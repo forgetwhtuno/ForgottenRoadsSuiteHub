@@ -12,14 +12,26 @@ function Find-Csc {
 }
 
 $csc = Find-Csc
+$out = Join-Path $env:TEMP "ErenshorSuiteHubDeterministicTests.exe"
+$sources = @(
+    "src\GameplayReadinessPolicy.cs",
+    "src\SuiteUiGeometry.cs",
+    "src\SuiteModuleCatalog.cs",
+    "src\ModDiscovery.cs",
+    "src\SuiteModuleRegistry.cs",
+    "src\SuiteWireCodec.cs",
+    "src\SuiteHubView.cs",
+    "tests\TestAssert.cs",
+    "tests\GameplayReadinessPolicyTests.cs",
+    "tests\ModDiscoveryTests.cs",
+    "tests\SuiteModuleRegistryTests.cs",
+    "tests\SuiteWireCodecTests.cs",
+    "tests\SuiteUiGeometryTests.cs",
+    "tests\SuiteHubViewTests.cs",
+    "tests\TestRunner.cs"
+) | ForEach-Object { Join-Path $ScriptRoot $_ }
 
-# Pure file-presence discovery logic used by the Overview tab - no UnityEngine or game assembly
-# dependency, so this stays testable outside the game. See src/ModDiscovery.cs.
-$out = Join-Path $env:TEMP "ErenshorSuiteHubModDiscoveryTests.exe"
-& $csc /nologo /target:exe /out:$out `
-    (Join-Path $ScriptRoot "src\ModDiscovery.cs") `
-    (Join-Path $ScriptRoot "tests\ModDiscoveryTests.cs") `
-    (Join-Path $ScriptRoot "tests\TestRunner.cs")
-if ($LASTEXITCODE -ne 0) { throw "Suite Hub mod-discovery tests did not compile." }
+& $csc /nologo /target:exe /out:$out $sources
+if ($LASTEXITCODE -ne 0) { throw "Suite Hub deterministic tests did not compile." }
 & $out
-if ($LASTEXITCODE -ne 0) { throw "Suite Hub mod-discovery tests failed." }
+if ($LASTEXITCODE -ne 0) { throw "Suite Hub deterministic tests failed." }
