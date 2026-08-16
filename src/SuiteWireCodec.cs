@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace ErenshorSuiteHub
 {
@@ -40,6 +41,37 @@ namespace ErenshorSuiteHub
             }
             if (!SuiteDescriptorValidation.ValidateModule(d, out error)) return null;
             return d;
+        }
+
+        internal static SuiteUiStateDescriptor ParseUiState(string payload, string expectedModuleId, out string error)
+        {
+            error = null;
+            Dictionary<string, string> f;
+            if (!TryParseFields(payload, out f, out error)) return null;
+
+            int protocol;
+            int sortOrder;
+            double activated;
+            bool open;
+            bool closeable;
+            if (!int.TryParse(Get(f, "protocol"), NumberStyles.Integer, CultureInfo.InvariantCulture, out protocol))
+            { error = "ui state protocol missing"; return null; }
+            if (!bool.TryParse(Get(f, "open"), out open)) { error = "ui state open missing"; return null; }
+            if (!bool.TryParse(Get(f, "closeable"), out closeable)) { error = "ui state closeable missing"; return null; }
+            if (!int.TryParse(Get(f, "sortOrder"), NumberStyles.Integer, CultureInfo.InvariantCulture, out sortOrder))
+            { error = "ui state sortOrder missing"; return null; }
+            if (!double.TryParse(Get(f, "activated"), NumberStyles.Float, CultureInfo.InvariantCulture, out activated))
+            { error = "ui state activated missing"; return null; }
+
+            SuiteUiStateDescriptor state = new SuiteUiStateDescriptor();
+            state.ProtocolVersion = protocol;
+            state.ModuleId = Get(f, "module");
+            state.Open = open;
+            state.Closeable = closeable;
+            state.SortOrder = sortOrder;
+            state.Activated = activated;
+            if (!SuiteDescriptorValidation.ValidateUiState(state, expectedModuleId, out error)) return null;
+            return state;
         }
 
         internal static List<SuiteSettingDescriptor> ParseSettings(string payload, SuiteSettingTier expectedTier, out string error)

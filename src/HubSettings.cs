@@ -30,8 +30,8 @@ namespace ErenshorSuiteHub
 
         // Position values are NORMALIZED (0..1 of screen extent), measured from the bottom-left
         // corner, so a saved layout survives a resolution change. -1 means "unset, use the default
-        // placement". Values greater than 1 are absolute pixels written by the pre-0.3.0 OnGUI Hub
-        // and are migrated automatically on first read (SuiteUiGeometry.InterpretStoredAxis).
+        // placement". Values greater than 1 are legacy pixels written by the pre-0.3.0 OnGUI Hub;
+        // their coordinate system is incompatible, so they are rejected and fall back to defaults.
 
         [Config("LauncherX", "UI", "Saved MODS launcher X position, normalized 0-1 across the screen width. -1 places it near the top-right on first use.")]
         public float LauncherX = -1f;
@@ -45,19 +45,25 @@ namespace ErenshorSuiteHub
         [Config("WindowY", "UI", "Saved Suite Hub window Y position, normalized 0-1 up the screen height. -1 centers the window on first use.")]
         public float WindowY = -1f;
 
-        [Config("WindowWidth", "UI", "Suite Hub window width in pixels.")]
+        [Config("WindowWidth", "UI", "Maximum Suite Hub window width in pixels.")]
         public float WindowWidth = 620f;
 
-        [Config("WindowHeight", "UI", "Suite Hub window height in pixels.")]
+        [Config("WindowHeight", "UI", "Maximum Suite Hub window height in pixels. Smaller pages fit to a compact height when opened.")]
         public float WindowHeight = 430f;
+
+        [Config("HiddenShortcuts", "Dock", "Comma-separated Suite module ids hidden from the expanded MODS dock. Newly available safe panel shortcuts are shown by default until explicitly hidden here.")]
+        public string DockHiddenShortcuts = string.Empty;
+
+        [Config("ConsolidatedLauncherModules", "Dock", "Internal one-time migration ledger. A module is listed after its existing standalone-with-Hub launcher preference has been safely turned off through that module's own Suite setting contract, so the unified dock is the default launcher surface without rewriting sibling config files directly.")]
+        public string DockConsolidatedLauncherModules = string.Empty;
 
         [Config("DeveloperUi", "Developer", "Show Suite Hub developer diagnostics and developer-level settings exposed by modules.")]
         public bool DeveloperUi = false;
 
-        [Config("UiDiagnostics", "Developer", "Log bounded Suite Hub UI lifecycle diagnostics as [HubUI] lines: canvas/launcher/window creation with the actual drag components read back off each handle, pointer-down on drag grips, module descriptor counts on selection, readiness transitions, and rebuild counters. Never logs per frame. Temporary aid for the 0.3.0 production regression; safe to leave on.")]
-        public bool UiDiagnostics = true;
+        [Config("UiDiagnostics", "Developer", "Opt in to bounded Suite Hub UI lifecycle diagnostics as [HubUI] lines. Never logs per frame; release default is OFF.")]
+        public bool UiDiagnostics = false;
 
-        [Config("HubInteractionValidated", "Developer", "Set true only after a live run confirms Suite Hub click/drag/camera-containment all work end to end. Reserved for future consumption by sibling mods' launcher-suppression policy (see AGENTS.md); currently informational only, since existing sibling SuiteUiPolicy.IsHubAvailable() checks only for Hub's presence, not this flag.")]
+        [Config("HubInteractionValidated", "Developer", "Manual live-validation marker for Suite Hub click/drag/camera containment. Informational only; launcher fallback uses the live Ready + uiAvailable presence capability instead of this flag.")]
         public bool HubInteractionValidated = false;
     }
 }

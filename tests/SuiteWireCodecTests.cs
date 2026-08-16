@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using ErenshorSuiteHub;
 
 internal static class SuiteWireCodecTests
@@ -59,6 +59,23 @@ internal static class SuiteWireCodecTests
             "id=mode&label=Mode&tier=basic&type=choice&value=Auto&mutable=false",
             SuiteSettingTier.Basic, out error);
         a += TestAssert.True(readOnlyChoice != null, "read-only choice without options is allowed");
+
+        SuiteUiStateDescriptor uiState = SuiteWireCodec.ParseUiState(
+            "protocol=1&module=journal&open=true&closeable=true&sortOrder=500&activated=1234.5",
+            "journal", out error);
+        a += TestAssert.True(uiState != null, "valid ui.state parses");
+        a += TestAssert.True(uiState.Open && uiState.Closeable, "ui.state flags parse");
+        a += TestAssert.Equal(500, uiState.SortOrder, "ui.state sort order parses");
+
+        SuiteUiStateDescriptor badUiState = SuiteWireCodec.ParseUiState(
+            "protocol=1&module=pvp&open=true&closeable=true&sortOrder=500&activated=1",
+            "journal", out error);
+        a += TestAssert.True(badUiState == null, "ui.state module spoof rejected");
+
+        SuiteUiStateDescriptor badActivation = SuiteWireCodec.ParseUiState(
+            "protocol=1&module=journal&open=true&closeable=true&sortOrder=500&activated=-1",
+            "journal", out error);
+        a += TestAssert.True(badActivation == null, "negative ui activation rejected");
         return a;
     }
 }
