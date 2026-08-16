@@ -524,7 +524,7 @@ namespace ErenshorSuiteHub
             layout.spacing = DockRowGap;
             layout.padding = new RectOffset((int)DockPadding, (int)DockPadding, (int)DockPadding, (int)DockPadding);
 
-            AddRowButton(_dockMenuRect, "Mod Suite", DockRowHeight, false, delegate
+            AddRowButton(_dockMenuRect, "Forgotten Roads", DockRowHeight, false, delegate
             {
                 if (OnRequestOpenSuite != null) OnRequestOpenSuite();
             });
@@ -856,7 +856,7 @@ namespace ErenshorSuiteHub
             mark.transform.localRotation = Quaternion.Euler(0f, 0f, 45f);
 
             TextMeshProUGUI title = NewLabel("SuiteHubTitle", header.transform,
-                "ERENSHOR MOD SUITE", 13f, FontStyles.Bold);
+                "FORGOTTEN ROADS", 13f, FontStyles.Bold);
             RectTransform tr = title.rectTransform;
             tr.anchorMin = new Vector2(0f, 0f);
             tr.anchorMax = new Vector2(1f, 1f);

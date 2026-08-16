@@ -23,9 +23,9 @@ internal static class SuiteDockSourceContractTests
             "old root is deactivated before deferred Unity destroy");
         a += TestAssert.True(ui.IndexOf("b.onClick.AddListener(delegate { _dockToggleQueued = true; });", StringComparison.Ordinal) >= 0,
             "MODS click queues dock toggle rather than full Suite toggle");
-        a += TestAssert.True(ui.IndexOf("AddRowButton(_dockMenuRect, \"Mod Suite\"", StringComparison.Ordinal) >= 0 &&
+        a += TestAssert.True(ui.IndexOf("AddRowButton(_dockMenuRect, \"Forgotten Roads\"", StringComparison.Ordinal) >= 0 &&
             ui.IndexOf("OnRequestOpenSuite", StringComparison.Ordinal) >= 0,
-            "Mod Suite is a separate dock row");
+            "Forgotten Roads is a separate dock row");
         a += TestAssert.True(ui.IndexOf("AttachDrag(grip, _launcherRect", StringComparison.Ordinal) >= 0 &&
             ui.IndexOf("AttachDrag(button", StringComparison.Ordinal) < 0,
             "drag grip and launcher button stay separate");

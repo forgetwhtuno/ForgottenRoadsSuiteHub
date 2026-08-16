@@ -101,7 +101,7 @@ try {
     $lines | Set-Content $rsp -Encoding ASCII
 
     $lunarisHash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $LunarisLibDir "Lunaris.dll")).Hash.ToLowerInvariant()
-    Write-Host "Building Erenshor Suite Hub as a native Lunaris plugin..." -ForegroundColor Cyan
+    Write-Host "Building Forgotten Roads Hub as a native Lunaris plugin..." -ForegroundColor Cyan
     Write-Host "  Game:    $GameDir"
     Write-Host "  Lunaris: $LunarisLibDir\Lunaris.dll ($lunarisHash)"
     & $csc "@$rsp"
@@ -114,5 +114,5 @@ finally {
     if (Test-Path $TempDir) { Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Write-Host "Installed Erenshor Suite Hub to $out" -ForegroundColor Green
+Write-Host "Installed Forgotten Roads Hub to $out" -ForegroundColor Green
 Write-Host "Use the draggable MODS UI button in game to open the Overview window." -ForegroundColor Green

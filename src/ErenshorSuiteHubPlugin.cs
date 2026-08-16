@@ -10,12 +10,12 @@ using UnityEngine;
 namespace ErenshorSuiteHub
 {
     [LunarisPlugin(PluginGuid, PluginVersion, "forgetwhtuno",
-        "One launcher and player-facing Hub for the optional Erenshor mod suite.")]
+        "One launcher and player-facing Hub for the optional Forgotten Roads for Erenshor collection.")]
     [LunarisPermission(LunarisPermission.FileAccess | LunarisPermission.Harmony)]
     public sealed class ErenshorSuiteHubPlugin : LunarisPlugin, ISuiteQuickCloseRuntime
     {
         internal const string PluginGuid = "forgetwhtuno.erenshor.suitehub";
-        internal const string PluginName = "Erenshor Suite Hub";
+        internal const string PluginName = "Forgotten Roads Hub";
         internal const string PluginVersion = "0.5.2";
 
         internal static ErenshorSuiteHubPlugin Instance;
@@ -96,7 +96,7 @@ namespace ErenshorSuiteHub
             }
             catch (Exception ex) { Logging.LogWarning("Suite Hub presence provider unavailable: " + ex.GetType().Name); }
 
-            Logging.LogInfo("Erenshor Suite Hub " + PluginVersion +
+            Logging.LogInfo("Forgotten Roads Hub " + PluginVersion +
                 " loaded. UI is gated by native character/world readiness and appears only after gameplay control is established.");
             if (!SuiteNativeEscapeCompatibility.IsNativeConsumeBound)
                 Logging.LogInfo("Suite quick-close native consumption is disabled: " +
@@ -268,7 +268,7 @@ namespace ErenshorSuiteHub
             }
             catch (Exception ex)
             {
-                Logging.LogError("Erenshor Suite Hub update failed: " + ex);
+                Logging.LogError("Forgotten Roads Hub update failed: " + ex);
                 // Exception recovery: never strand the native drag flag.
                 try { SuiteDragGuard.ForceReleaseIfHubOwned(); } catch { }
             }

@@ -1,18 +1,18 @@
-# Erenshor Suite Hub
+# Forgotten Roads Hub for Erenshor
 
 **Version:** 0.5.2 RC camera-containment candidate
 **Author:** forgetwhtuno
 **Loader:** native Lunaris
 **License:** Apache-2.0
 
-Optional shared launcher and configuration surface for the Erenshor mod suite. The Hub never owns
+Optional shared launcher and configuration surface for Forgotten Roads for Erenshor. The Hub never owns
 sibling gameplay state: each mod remains authoritative and usable when the Hub is absent, unloaded,
 or incompatible.
 
 ## Player UI
 
 Normal access is the visible **◆ MODS** dock launcher. Clicking `MODS` expands/collapses a compact
-launcher menu; it does **not** open the full Suite window. `Mod Suite` is the first expanded row and
+launcher menu; it does **not** open the full Forgotten Roads window. `Mod Suite` is the first expanded row and
 opens the existing full Hub. Safe module rows are discovered from live Suite descriptors and appear
 only when the module advertises literal `openPanel` and its Aura action endpoint is currently live.
 `/mods` and `/suitehub` remain developer/recovery commands only; there is no global access hotkey.
