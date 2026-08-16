@@ -30,14 +30,19 @@ namespace ErenshorSuiteHub
     internal sealed class SuiteHubUi
     {
         private const float LauncherWidth = 152f;
-        private const float LauncherHeight = 32f;
+        private const float LauncherHeight = SuiteUiTheme.LauncherHeight;
         private const float GripSize = 16f;
         private const float GripInset = 15f;
         // Left edge of the MODS button. Must clear the grip entirely: the drag affordance and the
         // click target must never overlap, or a press near the boundary becomes ambiguous.
         private const float ModsButtonLeft = GripInset + GripSize * 0.75f + 6f;
-        private const float HeaderHeight = 30f;
+        private const float HeaderHeight = SuiteUiTheme.HeaderHeight;
         private const float NavWidth = 150f;
+        private const float DockRowHeight = 28f;
+        private const float DockRowGap = 2f;
+        private const float DockPadding = 3f;
+        private const float DockHeadingHeight = 18f;
+        private const float DockFeedbackHeight = 28f;
 
         // Frames after (re)build during which we re-assert our restored position, as a safety
         // margin against anything else (layout groups settling, etc.) nudging the rect during the
@@ -49,6 +54,13 @@ namespace ErenshorSuiteHub
         private GameObject _root;
         private Canvas _canvas;
         private RectTransform _launcherRect;
+        private GameObject _dockMenu;
+        private RectTransform _dockMenuRect;
+        private readonly SuiteDockInteractionState _dockState = new SuiteDockInteractionState();
+        private bool _dockToggleQueued;
+        private bool _dockRebuildQueued;
+        private int _dockSignature;
+        private string _dockFeedback = string.Empty;
         private RectTransform _windowRect;
         private GameObject _window;
         private CanvasGroup _windowGroup;
@@ -57,6 +69,15 @@ namespace ErenshorSuiteHub
         private ScrollRect _pageScroll;
         private RectTransform _pageViewport;
         private TextMeshProUGUI _modsButtonLabel;
+        private TextMeshProUGUI _moduleVersionLabel;
+        private TextMeshProUGUI _statusLabel;
+        private TextMeshProUGUI _warningLabel;
+        private TextMeshProUGUI _actionResultLabel;
+        private TextMeshProUGUI _bridgeErrorLabel;
+        private TextMeshProUGUI _developerBridgeErrorLabel;
+        private double _windowActivatedAt;
+        private Vector2 _windowMaximumEnvelope;
+        private bool _contentFitEnabled;
 
         private int _launcherRestoreFrames;
         private int _windowRestoreFrames;
@@ -70,20 +91,32 @@ namespace ErenshorSuiteHub
         // installed/uninstalled) rebuilds this dictionary.
         private readonly Dictionary<string, NavRowVisual> _navRows =
             new Dictionary<string, NavRowVisual>(StringComparer.Ordinal);
+        private Dictionary<string, SettingValueVisual> _settingVisuals =
+            new Dictionary<string, SettingValueVisual>(StringComparer.Ordinal);
 
         private bool _navRebuildQueued;
         private bool _navSelectionDirty;
         private bool _pageRebuildQueued;
         private int _navSignature;
         private int _pageSignature;
+        // Only module identity changes (and initial construction/recovery) reset the page to the
+        // top. Disclosure/schema rebuilds preserve the player's current scroll, while dynamic
+        // value refreshes never touch ScrollRect position at all.
+        private bool _resetPageScrollOnNextRebuild;
 
         internal SuiteHubView View { get { return _view; } }
         internal bool IsBuilt { get { return _root != null; } }
         internal bool IsWindowOpen { get { return _window != null; } }
+        internal int SortingOrder { get { return _canvas != null ? _canvas.sortingOrder : SuiteDockPolicy.DockCanvasSortingOrder; } }
+        internal double WindowActivatedAt { get { return _windowActivatedAt; } }
 
         internal Action OnRequestClose;
         internal Action OnRequestResetPosition;
         internal Action OnRequestToggle;
+        internal Action OnRequestOpenSuite;
+        internal Action<string> OnRequestDockModuleOpen;
+        internal Func<List<SuiteDockModuleState>> GetDockModules;
+        internal Func<string, bool, bool> SetDockShortcutVisible;
         internal Func<List<ModPresence>> GetMods;
         internal Func<string> GetHubVersion;
         internal Func<bool> GetDeveloperEnabled;
@@ -112,11 +145,11 @@ namespace ErenshorSuiteHub
             _canvas = _root.GetComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.overrideSorting = true;
-            // 500 is the value the live-verified prototype used. Production shipped 300, which can
-            // place the Hub UNDER native Erenshor UI - a native graphic on top would then absorb the
-            // pointer event before it ever reaches the drag grip. Do not lower this without
-            // re-testing drag against native windows.
-            _canvas.sortingOrder = 500;
+            // Keep the dock above the suite's current retained module surfaces (which top out at
+            // 540 in this export) so dragging it across another open mod panel remains a dock gesture
+            // rather than hitting the underlying window. This still needs the normal live check
+            // against native Erenshor overlays after a game update.
+            _canvas.sortingOrder = SuiteDockPolicy.DockCanvasSortingOrder;
 
             CanvasScaler scaler = _root.GetComponent<CanvasScaler>();
             // Constant pixel size: the Hub is chrome, not world content. Anchors + normalized
@@ -135,6 +168,7 @@ namespace ErenshorSuiteHub
             SuiteHubDiagnostics.Log("launcher created rect=" + _launcherRect.sizeDelta +
                 " children=" + _launcherRect.childCount);
             ApplyLauncherPosition(launcherNormalized);
+            _dockSignature = ComputeDockSignature();
 
             _windowRestorePos = ResolvePanelVector(windowNormalized, windowSize,
                 Screen.width, Screen.height);
@@ -148,14 +182,24 @@ namespace ErenshorSuiteHub
         {
             CloseWindow();
             _launcherRect = null;
+            _dockMenu = null;
+            _dockMenuRect = null;
+            _dockState.Collapse();
+            _dockToggleQueued = false;
+            _dockRebuildQueued = false;
+            _dockFeedback = string.Empty;
             _canvas = null;
             _navContent = null;
             _pageContent = null;
             _pageScroll = null;
             _pageViewport = null;
             _modsButtonLabel = null;
+            ClearPageBindings();
             if (_root != null)
             {
+                // Unity Destroy is end-of-frame. Deactivate first so an immediate rebuild/hot reload
+                // can never leave two active Hub/dock roots raycasting during that frame.
+                _root.SetActive(false);
                 UnityEngine.Object.Destroy(_root);
                 _root = null;
                 SuiteHubDiagnostics.RootDestroys++;
@@ -172,7 +216,11 @@ namespace ErenshorSuiteHub
             _root.SetActive(visible);
             SuiteHubDiagnostics.SetActiveChanges++;
             SuiteHubDiagnostics.Log("root SetActive(" + visible + ")");
-            if (!visible) SuiteDragGuard.ForceReleaseIfHubOwned();
+            if (!visible)
+            {
+                CollapseDock();
+                SuiteDragGuard.ForceReleaseIfHubOwned();
+            }
         }
 
         // Driven from the plugin's Update.
@@ -194,9 +242,22 @@ namespace ErenshorSuiteHub
             // Resolution change: re-clamp both panels back on-screen.
             if (Screen.width != _lastScreenWidth || Screen.height != _lastScreenHeight)
             {
+                int previousWidth = _lastScreenWidth;
+                int previousHeight = _lastScreenHeight;
                 _lastScreenWidth = Screen.width;
                 _lastScreenHeight = Screen.height;
-                ReclampAfterResolutionChange();
+                ReclampAfterResolutionChange(previousWidth, previousHeight);
+            }
+
+            if (_dockToggleQueued)
+            {
+                _dockToggleQueued = false;
+                if (_dockState.IsExpanded) CollapseDock(); else ExpandDock(false);
+            }
+            if (_dockRebuildQueued)
+            {
+                _dockRebuildQueued = false;
+                if (_dockState.IsExpanded) RebuildDockMenu();
             }
 
             if (_navRebuildQueued)
@@ -217,27 +278,33 @@ namespace ErenshorSuiteHub
             }
         }
 
-        private void ReclampAfterResolutionChange()
+        private void ReclampAfterResolutionChange(int previousWidth, int previousHeight)
         {
+            if (previousWidth <= 0) previousWidth = Screen.width;
+            if (previousHeight <= 0) previousHeight = Screen.height;
+
             if (_launcherRect != null)
             {
                 Vector2 size = _launcherRect.sizeDelta;
                 Vector2 p = _launcherRect.anchoredPosition;
                 SuiteRect r = SuiteUiGeometry.ResolvePanel(
-                    SuiteUiGeometry.NormalizeAxis(p.x, _lastScreenWidth),
-                    SuiteUiGeometry.NormalizeAxis(p.y, _lastScreenHeight),
+                    SuiteUiGeometry.NormalizeAxis(p.x, previousWidth),
+                    SuiteUiGeometry.NormalizeAxis(p.y, previousHeight),
                     size.x, size.y, Screen.width, Screen.height);
-                _launcherRect.anchoredPosition = new Vector2(r.X, r.Y);
+                _launcherRestorePos = new Vector2(r.X, r.Y);
+                _launcherRect.anchoredPosition = _launcherRestorePos;
+                if (_dockState.IsExpanded) RebuildDockMenu();
             }
             if (_windowRect != null)
             {
                 Vector2 size = _windowRect.sizeDelta;
                 Vector2 p = _windowRect.anchoredPosition;
                 SuiteRect r = SuiteUiGeometry.ResolvePanel(
-                    SuiteUiGeometry.NormalizeAxis(p.x, _lastScreenWidth),
-                    SuiteUiGeometry.NormalizeAxis(p.y, _lastScreenHeight),
+                    SuiteUiGeometry.NormalizeAxis(p.x, previousWidth),
+                    SuiteUiGeometry.NormalizeAxis(p.y, previousHeight),
                     size.x, size.y, Screen.width, Screen.height);
-                _windowRect.anchoredPosition = new Vector2(r.X, r.Y);
+                _windowRestorePos = new Vector2(r.X, r.Y);
+                _windowRect.anchoredPosition = _windowRestorePos;
             }
         }
 
@@ -249,6 +316,7 @@ namespace ErenshorSuiteHub
             _launcherRestorePos = new Vector2(r.X, r.Y);
             _launcherRect.anchoredPosition = _launcherRestorePos;
             _launcherRestoreFrames = RestoreFrameBudget;
+            if (_dockState.IsExpanded) RebuildDockMenu();
         }
 
         // Unity-side bridge to the Unity-free geometry helpers (SuiteUiGeometry must stay free of
@@ -261,7 +329,8 @@ namespace ErenshorSuiteHub
 
         internal void ApplyWindowPosition(Vector2 normalized, Vector2 size)
         {
-            _windowRestorePos = ResolvePanelVector(normalized, size, Screen.width, Screen.height);
+            Vector2 effectiveSize = _windowRect != null ? _windowRect.sizeDelta : size;
+            _windowRestorePos = ResolvePanelVector(normalized, effectiveSize, Screen.width, Screen.height);
             if (_windowRect == null) return;
             _windowRect.anchoredPosition = _windowRestorePos;
             _windowRestoreFrames = RestoreFrameBudget;
@@ -272,8 +341,9 @@ namespace ErenshorSuiteHub
         private void BuildLauncher()
         {
             GameObject panel = NewUi("SuiteHubLauncher", _root.transform);
-            Image bg = AddImage(panel, new Color(0.015f, 0.09f, 0.125f, 0.88f));
+            Image bg = AddImage(panel, SuiteUiTheme.PanelBackground);
             bg.raycastTarget = true;
+            AddCrispBorder(panel, SuiteUiTheme.PanelBorder);
 
             _launcherRect = panel.GetComponent<RectTransform>();
             AnchorBottomLeft(_launcherRect);
@@ -284,7 +354,7 @@ namespace ErenshorSuiteHub
             // This affordance must stay VISIBLE: the player is told to drag by the diamond, so it is
             // sized and coloured to read clearly against the panel rather than blending into it.
             GameObject grip = NewUi("SuiteHubLauncherDragHandle", panel.transform);
-            Image gripImage = AddImage(grip, new Color(0.20f, 0.78f, 1f, 1f));
+            Image gripImage = AddImage(grip, SuiteUiTheme.PanelBorder);
             gripImage.raycastTarget = true; // required: no raycast target means no pointer events
 
             RectTransform gripRect = grip.GetComponent<RectTransform>();
@@ -299,8 +369,9 @@ namespace ErenshorSuiteHub
 
             // --- MODS button: the ONLY click surface -------------------------------------------
             GameObject button = NewUi("SuiteHubModsButton", panel.transform);
-            Image buttonImage = AddImage(button, new Color(0.12f, 0.38f, 0.48f, 0.95f));
+            Image buttonImage = AddImage(button, SuiteUiTheme.ControlBackground);
             buttonImage.raycastTarget = true;
+            AddCrispBorder(button, SuiteUiTheme.ControlBorder);
 
             RectTransform buttonRect = button.GetComponent<RectTransform>();
             buttonRect.anchorMin = new Vector2(0f, 0f);
@@ -310,21 +381,238 @@ namespace ErenshorSuiteHub
 
             Button b = button.AddComponent<Button>();
             b.targetGraphic = buttonImage;
-            SetButtonColors(b);
-            b.onClick.AddListener(delegate { if (OnRequestToggle != null) OnRequestToggle(); });
+            SetButtonColors(b, SuiteUiTheme.ControlBackground);
+            b.onClick.AddListener(delegate { _dockToggleQueued = true; });
 
             _modsButtonLabel = NewLabel("SuiteHubModsLabel", button.transform, "MODS", 12f, FontStyles.Bold);
             Stretch(_modsButtonLabel.rectTransform);
+            _modsButtonLabel.rectTransform.offsetMax = new Vector2(-18f, 0f);
             _modsButtonLabel.alignment = TextAlignmentOptions.Center;
+            _modsButtonLabel.color = SuiteUiTheme.TextAccent;
+            AddDockChevron(button.transform, false);
+        }
+
+        // The launcher uses a tiny owned Image-chevron instead of a TMP triangle glyph.  It is a
+        // disclosure affordance only; the whole MODS button remains the click target.
+        private static void AddDockChevron(Transform parent, bool pointsUp)
+        {
+            GameObject icon = NewUi("SuiteHubDockChevron", parent);
+            RectTransform r = icon.GetComponent<RectTransform>();
+            r.anchorMin = r.anchorMax = new Vector2(1f, 0.5f); r.pivot = new Vector2(0.5f, 0.5f);
+            r.sizeDelta = new Vector2(12f, 10f); r.anchoredPosition = new Vector2(-10f, 0f);
+            AddDockChevronBar(icon.transform, new Vector2(-2.2f, pointsUp ? -1f : 1f), pointsUp ? -45f : 45f);
+            AddDockChevronBar(icon.transform, new Vector2(2.2f, pointsUp ? -1f : 1f), pointsUp ? 45f : -45f);
+        }
+
+        private static void AddDockChevronBar(Transform parent, Vector2 position, float rotation)
+        {
+            GameObject bar = NewUi("Bar", parent); Image image = AddImage(bar, SuiteUiTheme.TextSecondary);
+            image.raycastTarget = false;
+            RectTransform r = bar.GetComponent<RectTransform>();
+            r.anchorMin = r.anchorMax = new Vector2(0.5f, 0.5f); r.pivot = new Vector2(0.5f, 0.5f);
+            r.sizeDelta = new Vector2(2f, 7f); r.anchoredPosition = position;
+            r.localRotation = Quaternion.Euler(0f, 0f, rotation);
+        }
+
+        private void SetDockChevron(bool expanded)
+        {
+            if (_modsButtonLabel == null) return;
+            Transform button = _modsButtonLabel.transform.parent;
+            Transform existing = button.Find("SuiteHubDockChevron");
+            if (existing != null) UnityEngine.Object.Destroy(existing.gameObject);
+            // Expanded means click to collapse upward; collapsed means click to expand down.
+            AddDockChevron(button, expanded);
+        }
+
+        internal void CollapseDock()
+        {
+            _dockState.Collapse();
+            _dockToggleQueued = false;
+            _dockRebuildQueued = false;
+            _dockFeedback = string.Empty;
+            if (_dockMenu != null)
+            {
+                _dockMenu.SetActive(false);
+                _dockMenu.transform.SetParent(null, false);
+                UnityEngine.Object.Destroy(_dockMenu);
+                _dockMenu = null;
+                _dockMenuRect = null;
+            }
+            if (_modsButtonLabel != null) _modsButtonLabel.text = "MODS";
+            SetDockChevron(false);
+            _dockSignature = ComputeDockSignature();
+        }
+
+        internal void CompleteDockLaunch(bool succeeded)
+        {
+            if (!_dockState.CompleteLaunch(succeeded)) return;
+            CollapseDock();
+        }
+
+        internal void SetDockFeedback(string text)
+        {
+            _dockFeedback = text ?? string.Empty;
+            if (_dockState.IsExpanded) _dockRebuildQueued = true;
+        }
+
+        internal void QueueDockRebuildIfContentChanged()
+        {
+            int signature = ComputeDockSignature();
+            if (signature == _dockSignature) return;
+            _dockSignature = signature;
+            if (_dockState.IsExpanded) _dockRebuildQueued = true;
+        }
+
+        private void ExpandDock(bool customize)
+        {
+            if (_launcherRect == null) return;
+            _dockState.Expand(customize);
+            _dockFeedback = string.Empty;
+            RebuildDockMenu();
+            if (_modsButtonLabel != null) _modsButtonLabel.text = "MODS";
+            SetDockChevron(true);
+        }
+
+        private int ComputeDockSignature()
+        {
+            List<SuiteDockModuleState> states = GetDockModules != null ? GetDockModules() : null;
+            return SuiteDockPolicy.ComputeStructureSignature(states, _dockState.IsCustomizing);
+        }
+
+        private void RebuildDockMenu()
+        {
+            if (!_dockState.IsExpanded || _launcherRect == null) return;
+            if (_dockMenu != null)
+            {
+                _dockMenu.SetActive(false);
+                _dockMenu.transform.SetParent(null, false);
+                UnityEngine.Object.Destroy(_dockMenu);
+                _dockMenu = null;
+                _dockMenuRect = null;
+            }
+
+            List<SuiteDockModuleState> all = GetDockModules != null
+                ? GetDockModules() : new List<SuiteDockModuleState>();
+            List<SuiteDockModuleState> rows = SuiteDockPolicy.OrderedLaunchable(all, _dockState.IsCustomizing);
+            int interactiveRows = 2 + rows.Count; // Mod Suite + Customize/Done + modules
+            bool hasHeading = _dockState.IsCustomizing;
+            bool hasFeedback = !string.IsNullOrEmpty(_dockFeedback);
+            float height = DockPadding * 2f + interactiveRows * DockRowHeight +
+                Math.Max(0, interactiveRows - 1) * DockRowGap;
+            if (hasHeading) height += DockHeadingHeight + DockRowGap;
+            if (hasFeedback) height += DockFeedbackHeight + DockRowGap;
+
+            GameObject menu = NewUi("SuiteHubDockMenu", _launcherRect);
+            Image bg = AddImage(menu, SuiteUiTheme.PanelBackground);
+            bg.raycastTarget = true;
+            AddCrispBorder(menu, SuiteUiTheme.PanelBorder);
+            _dockMenu = menu;
+            _dockMenuRect = menu.GetComponent<RectTransform>();
+            bool upward = SuiteDockPolicy.ShouldOpenUpward(
+                _launcherRect.anchoredPosition.y, LauncherHeight, height, Screen.height);
+            _dockMenuRect.anchorMin = upward ? new Vector2(0f, 1f) : new Vector2(0f, 0f);
+            _dockMenuRect.anchorMax = _dockMenuRect.anchorMin;
+            _dockMenuRect.pivot = upward ? new Vector2(0f, 0f) : new Vector2(0f, 1f);
+            _dockMenuRect.sizeDelta = new Vector2(LauncherWidth, height);
+            _dockMenuRect.anchoredPosition = Vector2.zero;
+
+            VerticalLayoutGroup layout = menu.AddComponent<VerticalLayoutGroup>();
+            layout.childControlHeight = true;
+            layout.childControlWidth = true;
+            layout.childForceExpandHeight = false;
+            layout.childForceExpandWidth = true;
+            layout.spacing = DockRowGap;
+            layout.padding = new RectOffset((int)DockPadding, (int)DockPadding, (int)DockPadding, (int)DockPadding);
+
+            AddRowButton(_dockMenuRect, "Mod Suite", DockRowHeight, false, delegate
+            {
+                if (OnRequestOpenSuite != null) OnRequestOpenSuite();
+            });
+
+            if (_dockState.IsCustomizing)
+            {
+                TextMeshProUGUI heading = NewLabel("DockCustomizeHeading", menu.transform,
+                    "CUSTOMIZE SHORTCUTS", 9f, FontStyles.Bold);
+                LayoutElement headingLayout = heading.gameObject.AddComponent<LayoutElement>();
+                headingLayout.minHeight = DockHeadingHeight;
+                headingLayout.preferredHeight = DockHeadingHeight;
+                heading.alignment = TextAlignmentOptions.Left;
+                heading.color = SuiteUiTheme.TextSecondary;
+
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    SuiteDockModuleState state = rows[i];
+                    string capturedId = state.ModuleId;
+                    bool visible = !state.Hidden;
+                    string label = state.DisplayName + (visible ? "  [ON]" : "  [OFF]");
+                    AddRowButton(_dockMenuRect, label, DockRowHeight, visible, delegate
+                    {
+                        if (SetDockShortcutVisible != null && SetDockShortcutVisible(capturedId, !visible))
+                        {
+                            _dockFeedback = string.Empty;
+                            _dockRebuildQueued = true;
+                        }
+                    });
+                }
+
+                AddRowButton(_dockMenuRect, "Done", DockRowHeight, false, delegate
+                {
+                    _dockState.DoneCustomize();
+                    _dockFeedback = string.Empty;
+                    _dockRebuildQueued = true;
+                });
+            }
+            else
+            {
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    SuiteDockModuleState state = rows[i];
+                    string capturedId = state.ModuleId;
+                    AddRowButton(_dockMenuRect, state.DisplayName, DockRowHeight, false, delegate
+                    {
+                        if (OnRequestDockModuleOpen != null) OnRequestDockModuleOpen(capturedId);
+                    });
+                }
+
+                AddRowButton(_dockMenuRect, "Customize...", DockRowHeight, false, delegate
+                {
+                    _dockState.ShowCustomize();
+                    _dockFeedback = string.Empty;
+                    _dockRebuildQueued = true;
+                });
+            }
+
+            if (hasFeedback)
+            {
+                TextMeshProUGUI feedback = NewLabel("DockFeedback", menu.transform,
+                    _dockFeedback, 9f, FontStyles.Normal);
+                LayoutElement feedbackLayout = feedback.gameObject.AddComponent<LayoutElement>();
+                feedbackLayout.minHeight = DockFeedbackHeight;
+                feedbackLayout.preferredHeight = DockFeedbackHeight;
+                feedback.enableWordWrapping = true;
+                feedback.alignment = TextAlignmentOptions.Left;
+                feedback.color = SuiteUiTheme.TextWarning;
+            }
+
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_dockMenuRect);
+            _dockSignature = ComputeDockSignature();
+            if (_modsButtonLabel != null) _modsButtonLabel.text = "MODS";
         }
 
         private void PersistLauncherPosition()
         {
             if (_launcherRect == null || PersistLauncherNormalized == null) return;
             Vector2 p = _launcherRect.anchoredPosition;
+            SuiteRect clamped = SuiteUiGeometry.ClampLauncher(
+                new SuiteRect(p.x, p.y, LauncherWidth, LauncherHeight),
+                Screen.width, Screen.height, LauncherWidth);
+            p = new Vector2(clamped.X, clamped.Y);
+            _launcherRect.anchoredPosition = p;
+            _launcherRestorePos = p;
             PersistLauncherNormalized(new Vector2(
                 SuiteUiGeometry.NormalizeAxis(p.x, Screen.width),
                 SuiteUiGeometry.NormalizeAxis(p.y, Screen.height)));
+            if (_dockState.IsExpanded) RebuildDockMenu();
         }
 
         private void PersistWindowPosition()
@@ -348,6 +636,8 @@ namespace ErenshorSuiteHub
             SuiteDragGuard guard = handle.AddComponent<SuiteDragGuard>();
             guard.Target = target;
             guard.OnDragCompleted = onCompleted;
+            guard.OnPointerActivated = string.Equals(label, "header", StringComparison.Ordinal)
+                ? (Action)MarkWindowActivated : null;
             guard.DiagnosticLabel = label;
 
             Image graphic = handle.GetComponent<Image>();
@@ -364,13 +654,18 @@ namespace ErenshorSuiteHub
         internal void OpenWindow(Vector2 normalized, Vector2 size)
         {
             if (_root == null || _window != null) return;
+            _windowMaximumEnvelope = size;
+            _contentFitEnabled = false;
 
             GameObject panel = NewUi("SuiteHubWindow", _root.transform);
-            Image bg = AddImage(panel, new Color(0.015f, 0.09f, 0.125f, 0.96f));
+            Image bg = AddImage(panel, SuiteUiTheme.PanelBackground);
             bg.raycastTarget = true;
+            AddCrispBorder(panel, SuiteUiTheme.PanelBorder);
 
             _windowRect = panel.GetComponent<RectTransform>();
             AnchorBottomLeft(_windowRect);
+            // Start from the configured/default maximum envelope. Initial content is laid out
+            // synchronously below, then the window is fit once before the frame is presented.
             _windowRect.sizeDelta = size;
 
             _windowGroup = panel.AddComponent<CanvasGroup>();
@@ -382,14 +677,22 @@ namespace ErenshorSuiteHub
             BuildPageArea(panel.transform);
 
             _window = panel;
+            MarkWindowActivated();
             SuiteHubDiagnostics.WindowCreates++;
-            SuiteHubDiagnostics.Log("window created size=" + size + " normalized=" + normalized);
 
-            ApplyWindowPosition(normalized, size);
             RebuildNav();
+            _resetPageScrollOnNextRebuild = true;
             RebuildPage();
+
+            Vector2 fitted = ResolveInitialCompactWindowSize(size);
+            _windowRect.sizeDelta = fitted;
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_windowRect);
+            ApplyWindowPosition(normalized, fitted);
+            _contentFitEnabled = true;
+
             _navSignature = ComputeNavSignature();
             _pageSignature = ComputePageSignature();
+            SuiteHubDiagnostics.Log("window created maxSize=" + size + " fittedSize=" + fitted + " normalized=" + normalized);
         }
 
         internal void CloseWindow()
@@ -406,6 +709,11 @@ namespace ErenshorSuiteHub
             _pageContent = null;
             _pageScroll = null;
             _pageViewport = null;
+            ClearPageBindings();
+            _windowActivatedAt = 0d;
+            _contentFitEnabled = false;
+            _windowMaximumEnvelope = Vector2.zero;
+            _resetPageScrollOnNextRebuild = false;
         }
 
         // Selection changed: the nav list's highlighted row AND the page content both need to
@@ -418,6 +726,8 @@ namespace ErenshorSuiteHub
         {
             SuiteHubDiagnostics.SelectionChanges++;
             _navSelectionDirty = true;
+            _resetPageScrollOnNextRebuild = SuiteHubScrollPolicy.ShouldResetFor(
+                SuiteHubPageChangeReason.ModuleSelection);
             _pageRebuildQueued = true;
         }
 
@@ -427,12 +737,15 @@ namespace ErenshorSuiteHub
         internal void QueueNavStructureRebuild()
         {
             _navRebuildQueued = true;
+            // Installed-row changes can invalidate the selected module and force Overview. Treat
+            // that recovery like an identity change so the replacement page starts at the top.
+            _resetPageScrollOnNextRebuild = true;
             _pageRebuildQueued = true;
         }
 
-        // Page-only state changed (a setting toggled, a disclosure section opened, an action ran).
-        // The nav list's content is unaffected and must not be touched - rebuilding it too was
-        // unnecessary churn and part of what made module switching feel heavier than it needed to.
+        // Page STRUCTURE changed (selection/disclosure/schema availability). Dynamic status,
+        // warning, action-result, bool and choice values are retained bindings and must update in
+        // place instead of taking this rebuild path. The nav list is never touched here.
         internal void QueuePageRebuild()
         {
             _pageRebuildQueued = true;
@@ -461,103 +774,61 @@ namespace ErenshorSuiteHub
             {
                 _pageSignature = pageSig;
                 _pageRebuildQueued = true;
-                SuiteHubDiagnostics.Log("page signature changed -> page rebuild queued");
+                SuiteHubDiagnostics.Log("page structure signature changed -> page rebuild queued");
             }
+
+            // Always apply values that still have retained bindings now, even if the same mutation
+            // also changed schema and queued an atomic structural rebuild for the next Update. This
+            // gives bool/status feedback in the click frame instead of waiting for reconstruction.
+            RefreshDynamicPageValues();
         }
 
-        // Structural hash of what the nav list renders: installed modules and whether each has a
-        // live bridge (shown as a status dot), plus the current selection (for highlight).
+        // Navigation structure contains only the ordered installed rows. Selection is dynamic
+        // visual state and is deliberately excluded; otherwise the next bridge poll would undo the
+        // in-place highlight update by scheduling a delayed full nav rebuild.
         private int ComputeNavSignature()
         {
-            unchecked
-            {
-                int h = 13;
-                List<ModPresence> mods = GetMods != null ? GetMods() : null;
-                if (mods != null)
-                {
-                    for (int i = 0; i < mods.Count; i++)
-                    {
-                        h = h * 31 + (mods[i].ModuleId != null ? mods[i].ModuleId.GetHashCode() : 0);
-                        h = h * 31 + (mods[i].Installed ? 1 : 0);
-                    }
-                }
-                h = h * 31 + (_view.SelectedModuleId != null ? _view.SelectedModuleId.GetHashCode() : 0);
-                return h;
-            }
+            return SuiteHubRefreshPolicy.ComputeNavStructureSignature(GetMods != null ? GetMods() : null);
         }
 
-        // Structural hash of what the page renders: the selected module's descriptor/settings plus
-        // view disclosure state. Deliberately includes bridge settings values so a real module
-        // update still refreshes the page even while the selection itself hasn't changed.
         private int ComputePageSignature()
         {
-            unchecked
+            bool developerEnabled = GetDeveloperEnabled != null && GetDeveloperEnabled();
+            if (_view.IsOverviewSelected)
             {
-                int h = 17;
-                h = h * 31 + (_view.SelectedModuleId != null ? _view.SelectedModuleId.GetHashCode() : 0);
-
-                if (_view.IsOverviewSelected)
+                List<SuiteHubRefreshPolicy.OverviewModuleShape> shapes =
+                    new List<SuiteHubRefreshPolicy.OverviewModuleShape>();
+                List<ModPresence> mods = CurrentMods();
+                for (int i = 0; i < mods.Count; i++)
                 {
-                    List<ModPresence> mods = GetMods != null ? GetMods() : null;
-                    if (mods != null)
-                    {
-                        for (int i = 0; i < mods.Count; i++)
-                        {
-                            if (!mods[i].Installed) continue;
-                            h = h * 31 + (mods[i].ModuleId != null ? mods[i].ModuleId.GetHashCode() : 0);
-                            SuiteModuleDescriptor runtime = ErenshorSuiteHubPlugin.GetRegisteredModule(mods[i].ModuleId);
-                            h = h * 31 + (runtime == null ? 0 : 1);
-                            if (runtime != null) h = h * 31 + (runtime.Version != null ? runtime.Version.GetHashCode() : 0);
-                        }
-                    }
+                    if (!mods[i].Installed) continue;
+                    SuiteModuleDescriptor runtime = ErenshorSuiteHubPlugin.GetRegisteredModule(mods[i].ModuleId);
+                    shapes.Add(new SuiteHubRefreshPolicy.OverviewModuleShape(
+                        mods[i].ModuleId, runtime != null, runtime == null ? string.Empty : runtime.Version));
                 }
-                else
-                {
-                    SuiteModuleDescriptor runtime = ErenshorSuiteHubPlugin.GetRegisteredModule(_view.SelectedModuleId);
-                    h = h * 31 + (runtime == null ? 0 : 1);
-                    if (runtime != null)
-                    {
-                        h = h * 31 + (runtime.Version != null ? runtime.Version.GetHashCode() : 0);
-                        h = h * 31 + (runtime.Status != null ? runtime.Status.GetHashCode() : 0);
-                        h = h * 31 + (runtime.Warning != null ? runtime.Warning.GetHashCode() : 0);
-                    }
-
-                    AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(_view.SelectedModuleId);
-                    h = h * 31 + SettingsSignature(bridge == null ? null : bridge.CachedBasicSettings);
-                    h = h * 31 + SettingsSignature(bridge == null ? null : bridge.CachedAdvancedSettings);
-                    h = h * 31 + SettingsSignature(bridge == null ? null : bridge.CachedDeveloperSettings);
-                    if (bridge != null && bridge.LastError != null) h = h * 31 + bridge.LastError.GetHashCode();
-                }
-
-                h = h * 31 + (_view.ShowAdvanced ? 1 : 0);
-                h = h * 31 + (_view.ShowDeveloper ? 1 : 0);
-                h = h * 31 + (_view.LastActionResult != null ? _view.LastActionResult.GetHashCode() : 0);
-                return h;
+                return SuiteHubRefreshPolicy.ComputeOverviewStructureSignature(shapes, developerEnabled);
             }
-        }
 
-        private static int SettingsSignature(List<SuiteSettingDescriptor> settings)
-        {
-            if (settings == null) return 0;
-            unchecked
-            {
-                int h = 7 + settings.Count;
-                for (int i = 0; i < settings.Count; i++)
-                {
-                    SuiteSettingDescriptor s = settings[i];
-                    h = h * 31 + (s.Id != null ? s.Id.GetHashCode() : 0);
-                    h = h * 31 + (s.Value != null ? s.Value.GetHashCode() : 0);
-                    h = h * 31 + (s.Mutable ? 1 : 0);
-                }
-                return h;
-            }
+            SuiteModuleDescriptor descriptor = ErenshorSuiteHubPlugin.GetRegisteredModule(_view.SelectedModuleId);
+            AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(_view.SelectedModuleId);
+            return SuiteHubRefreshPolicy.ComputePageStructureSignature(
+                _view.SelectedModuleId,
+                descriptor != null,
+                descriptor == null ? null : descriptor.Actions,
+                bridge == null ? null : bridge.CachedBasicSettings,
+                bridge == null ? null : bridge.CachedAdvancedSettings,
+                bridge == null ? null : bridge.CachedDeveloperSettings,
+                _view.ShowAdvanced,
+                _view.ShowDeveloper,
+                developerEnabled);
         }
 
         private void BuildHeader(Transform parent)
         {
             GameObject header = NewUi("SuiteHubWindowHeader", parent);
-            Image headerImage = AddImage(header, new Color(0.07f, 0.28f, 0.34f, 0.98f));
+            Image headerImage = AddImage(header, SuiteUiTheme.HeaderBackground);
             headerImage.raycastTarget = true;
+            AddCrispBorder(header, SuiteUiTheme.PanelBorder);
 
             RectTransform r = header.GetComponent<RectTransform>();
             r.anchorMin = new Vector2(0f, 1f);
@@ -574,7 +845,7 @@ namespace ErenshorSuiteHub
             // raycastTarget stays FALSE: the header itself is the drag surface, and this must not
             // intercept the pointer event that SuiteDragGuard on the header needs to receive.
             GameObject mark = NewUi("SuiteHubHeaderGripMark", header.transform);
-            Image markImage = AddImage(mark, new Color(0.20f, 0.78f, 1f, 1f));
+            Image markImage = AddImage(mark, SuiteUiTheme.PanelBorder);
             markImage.raycastTarget = false;
             RectTransform markRect = mark.GetComponent<RectTransform>();
             markRect.anchorMin = new Vector2(0f, 0.5f);
@@ -592,7 +863,7 @@ namespace ErenshorSuiteHub
             tr.offsetMin = new Vector2(ModsButtonLeft + 6f, 0f);
             tr.offsetMax = new Vector2(-120f, 0f);
             title.alignment = TextAlignmentOptions.Left;
-            title.color = new Color(0.56f, 0.88f, 1f, 1f);
+            title.color = SuiteUiTheme.TextAccent;
 
             MakeHeaderButton(header.transform, "RESET", 58f, -62f,
                 delegate { if (OnRequestResetPosition != null) OnRequestResetPosition(); });
@@ -603,8 +874,9 @@ namespace ErenshorSuiteHub
         private void MakeHeaderButton(Transform parent, string text, float width, float rightOffset, UnityEngine.Events.UnityAction action)
         {
             GameObject go = NewUi("SuiteHubHeaderButton_" + text, parent);
-            Image img = AddImage(go, new Color(0.12f, 0.38f, 0.48f, 0.95f));
+            Image img = AddImage(go, SuiteUiTheme.ControlBackground);
             img.raycastTarget = true;
+            AddCrispBorder(go, SuiteUiTheme.ControlBorder);
 
             RectTransform r = go.GetComponent<RectTransform>();
             r.anchorMin = new Vector2(1f, 0.5f);
@@ -615,8 +887,12 @@ namespace ErenshorSuiteHub
 
             Button b = go.AddComponent<Button>();
             b.targetGraphic = img;
-            SetButtonColors(b);
-            b.onClick.AddListener(action);
+            SetButtonColors(b, SuiteUiTheme.ControlBackground);
+            b.onClick.AddListener(delegate
+            {
+                MarkWindowActivated();
+                if (action != null) action();
+            });
 
             TextMeshProUGUI label = NewLabel("Label", go.transform, text, 10f, FontStyles.Bold);
             Stretch(label.rectTransform);
@@ -631,8 +907,9 @@ namespace ErenshorSuiteHub
             r.anchorMax = new Vector2(0f, 1f);
             r.pivot = new Vector2(0f, 1f);
             r.sizeDelta = new Vector2(NavWidth, 0f);
-            r.offsetMin = new Vector2(8f, 8f);
-            r.offsetMax = new Vector2(8f + NavWidth, -(HeaderHeight + 6f));
+            r.offsetMin = new Vector2(SuiteUiTheme.OuterPadding, SuiteUiTheme.OuterPadding);
+            r.offsetMax = new Vector2(SuiteUiTheme.OuterPadding + NavWidth,
+                -(HeaderHeight + SuiteUiTheme.OuterPadding));
 
             ScrollRect navScroll;
             RectTransform navViewport;
@@ -646,8 +923,9 @@ namespace ErenshorSuiteHub
             r.anchorMin = new Vector2(0f, 0f);
             r.anchorMax = new Vector2(1f, 1f);
             r.pivot = new Vector2(0f, 1f);
-            r.offsetMin = new Vector2(NavWidth + 16f, 8f);
-            r.offsetMax = new Vector2(-8f, -(HeaderHeight + 6f));
+            r.offsetMin = new Vector2(NavWidth + SuiteUiTheme.OuterPadding * 2f, SuiteUiTheme.OuterPadding);
+            r.offsetMax = new Vector2(-SuiteUiTheme.OuterPadding,
+                -(HeaderHeight + SuiteUiTheme.OuterPadding));
 
             RectTransform viewport;
             _pageContent = BuildScrollArea(area.transform, "PageScroll", out _pageScroll, out viewport);
@@ -694,11 +972,15 @@ namespace ErenshorSuiteHub
             content.anchoredPosition = Vector2.zero;
 
             VerticalLayoutGroup layout = contentGo.AddComponent<VerticalLayoutGroup>();
-            layout.childControlHeight = false;
+            // The parent must own child heights. With this false, Unity uses each RectTransform's
+            // existing/default height (often ~100px) and ignores our 6px spacer / 24px row
+            // LayoutElements, which creates the large dead gaps seen live inside otherwise-compact
+            // windows. TextMeshPro and LayoutElement now report preferred/min heights to this group.
+            layout.childControlHeight = true;
             layout.childControlWidth = true;
             layout.childForceExpandHeight = false;
             layout.childForceExpandWidth = true;
-            layout.spacing = 3f;
+            layout.spacing = SuiteUiTheme.RowGap;
             layout.padding = new RectOffset(2, 2, 2, 2);
 
             ContentSizeFitter fitter = contentGo.AddComponent<ContentSizeFitter>();
@@ -733,6 +1015,7 @@ namespace ErenshorSuiteHub
             // than over the next 1-2 frames, so there is no frame where the ScrollRect content has
             // stale/zero height - the "layout temporarily has invalid dimensions" symptom.
             LayoutRebuilder.ForceRebuildLayoutImmediate(_navContent);
+            _navSignature = ComputeNavSignature();
         }
 
         // Lightweight selection update: recolors the existing persistent nav rows in place. Row
@@ -748,12 +1031,10 @@ namespace ErenshorSuiteHub
 
         private static void ApplyNavRowStyle(NavRowVisual row, bool selected)
         {
-            if (row.Background != null)
-                row.Background.color = selected
-                    ? new Color(0.07f, 0.28f, 0.34f, 0.98f)
-                    : new Color(0.035f, 0.17f, 0.22f, 0.90f);
-            if (row.Label != null)
-                row.Label.color = selected ? new Color(0.88f, 1f, 0.98f, 1f) : new Color(0.84f, 0.94f, 1f, 1f);
+            Color background = selected ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+            if (row.Background != null) row.Background.color = background;
+            if (row.Button != null) SetButtonColors(row.Button, background);
+            if (row.Label != null) row.Label.color = selected ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
         }
 
         // Page content only. Rebuilding this must never touch the nav list.
@@ -770,7 +1051,11 @@ namespace ErenshorSuiteHub
             _view.EnsureSelectionValid(mods);
 
             RectTransform oldContent = _pageContent;
+            PageBindingSnapshot oldBindings = CapturePageBindings();
+            float previousScroll = _pageScroll.verticalNormalizedPosition;
+            bool resetScrollToTop = oldContent == null || _resetPageScrollOnNextRebuild;
             RectTransform newContent = CreateContentRoot(_pageViewport);
+            BeginPageBindings();
             _pageContent = newContent; // page builder methods below write into this
 
             try
@@ -790,6 +1075,7 @@ namespace ErenshorSuiteHub
                 // Building the new page failed: discard it and keep the old one displayed rather
                 // than swap to a broken/half-built page.
                 _pageContent = oldContent;
+                RestorePageBindings(oldBindings);
                 UnityEngine.Object.Destroy(newContent.gameObject);
                 throw;
             }
@@ -800,7 +1086,10 @@ namespace ErenshorSuiteHub
             LayoutRebuilder.ForceRebuildLayoutImmediate(newContent);
 
             _pageScroll.content = newContent;
-            _pageScroll.verticalNormalizedPosition = 1f; // new page starts scrolled to top
+            if (resetScrollToTop) _pageScroll.StopMovement();
+            _pageScroll.verticalNormalizedPosition = SuiteHubScrollPolicy.ResolveAfterStructuralRebuild(
+                previousScroll, resetScrollToTop);
+            _resetPageScrollOnNextRebuild = false;
 
             if (oldContent != null)
             {
@@ -808,6 +1097,14 @@ namespace ErenshorSuiteHub
                 oldContent.SetParent(null, false);
                 UnityEngine.Object.Destroy(oldContent.gameObject);
             }
+
+            // Structural page changes (module selection, disclosure, schema) are the only time the
+            // open Hub changes height. Dynamic status/value refreshes never call this path, so the
+            // panel does not breathe or flicker on the one-second bridge poll.
+            if (_contentFitEnabled) FitWindowToCurrentStructure();
+
+            _pageSignature = ComputePageSignature();
+            RefreshDynamicPageValues();
         }
 
         // Answers "is the Hub RECEIVING controls" separately from "is the Hub RENDERING them".
@@ -848,6 +1145,7 @@ namespace ErenshorSuiteHub
             string captured = moduleId;
             NavRowVisual row = AddNavRow(_navContent, label, selected, delegate
             {
+                MarkWindowActivated();
                 _view.Select(captured);
                 QueueSelectionChanged();
             });
@@ -924,131 +1222,379 @@ namespace ErenshorSuiteHub
             AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(moduleId);
 
             AddSectionLabel(_pageContent, def.DisplayName.ToUpperInvariant());
-            AddBodyLabel(_pageContent, def.Summary);
-
-            AddSpacer(_pageContent, 6f);
+            AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
             AddSectionLabel(_pageContent, "STATUS");
-            AddBodyLabel(_pageContent, "Installed: yes (" + def.DllName + ")");
+
             if (runtime == null)
             {
                 AddMutedLabel(_pageContent,
-                    "Suite integration: unavailable. The mod remains standalone and usable through its own interface.");
-                AddMutedLabel(_pageContent, "Fallback: " + def.FallbackInterface);
-                if (bridge != null && !string.IsNullOrEmpty(bridge.LastError))
-                    AddWarningLabel(_pageContent, "Bridge rejected: " + bridge.LastError);
-            }
-            else
-            {
-                AddBodyLabel(_pageContent, "Version: " + runtime.Version);
-                if (!string.IsNullOrEmpty(runtime.Status)) AddBodyLabel(_pageContent, runtime.Status);
-                if (!string.IsNullOrEmpty(runtime.Warning)) AddWarningLabel(_pageContent, runtime.Warning);
+                    "Suite controls unavailable. The standalone interface remains authoritative and available.");
+                _bridgeErrorLabel = AddWarningLabel(_pageContent, string.Empty);
+                SetOptionalText(_bridgeErrorLabel,
+                    bridge != null && !string.IsNullOrEmpty(bridge.LastError) ? "Bridge rejected: " + bridge.LastError : string.Empty);
+                return;
             }
 
-            AddSpacer(_pageContent, 6f);
-            AddSectionLabel(_pageContent, "COMMON CONTROLS");
-            if (runtime != null && runtime.HasAction("openPanel"))
+            _statusLabel = AddBodyLabel(_pageContent, string.Empty);
+            _warningLabel = AddWarningLabel(_pageContent, string.Empty);
+            SetOptionalText(_statusLabel, string.IsNullOrEmpty(runtime.Status) ? "Available" : runtime.Status);
+            SetOptionalText(_warningLabel, runtime.Warning);
+
+            List<SuiteSettingDescriptor> basic = bridge == null ? null : bridge.CachedBasicSettings;
+            List<SuiteSettingDescriptor> advanced = bridge == null ? null : bridge.CachedAdvancedSettings;
+            List<SuiteSettingDescriptor> developer = bridge == null ? null : bridge.CachedDeveloperSettings;
+
+            // Compact sequential player flow. Sections only exist when they contain something:
+            // title -> status -> basic -> panel/actions -> disclosure rows. No fixed vertical
+            // regions and no empty PANEL/CONTROLS reservation.
+            if (SuiteHubPagePolicy.HasBasicSection(basic))
             {
-                string captured = moduleId;
-                AddRowButton(_pageContent, "Open dedicated panel", 24f, false, delegate
+                AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
+                AddSectionLabel(_pageContent, "BASIC");
+                BuildSettings(moduleId, basic);
+            }
+
+            if (SuiteHubPagePolicy.HasPanelSection(runtime.Actions))
+            {
+                AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
+                AddSectionLabel(_pageContent, "PANEL");
+                AddModuleActionButton(moduleId, "openPanel", "Open " + def.DisplayName);
+            }
+
+            if (SuiteHubPagePolicy.HasCompactActionSection(moduleId, runtime.Actions))
+            {
+                AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
+                AddSectionLabel(_pageContent, "ACTIONS");
+                BuildCompactModuleActions(moduleId, runtime);
+            }
+
+            _actionResultLabel = AddMutedLabel(_pageContent, string.Empty);
+            SetOptionalText(_actionResultLabel, _view.LastActionResult);
+
+            if (SuiteHubPagePolicy.HasAdvancedSection(advanced, runtime.Actions))
+            {
+                AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
+                AddDisclosureRow(_pageContent, "Advanced", _view.ShowAdvanced,
+                    delegate
+                    {
+                        MarkWindowActivated();
+                        _view.SetAdvanced(!_view.ShowAdvanced);
+                        QueuePageRebuild();
+                    });
+                if (_view.ShowAdvanced)
                 {
-                    string result;
-                    ErenshorSuiteHubPlugin.TryInvokeModuleAction(captured, "openPanel", string.Empty, out result);
-                    _view.SetActionResult(result);
-                    QueuePageRebuild();
-                });
+                    BuildSettings(moduleId, advanced);
+                    if (runtime.HasAction("resetPanel")) AddModuleActionButton(moduleId, "resetPanel", "Reset panel position");
+                    if (runtime.HasAction("resetLauncher")) AddModuleActionButton(moduleId, "resetLauncher", "Reset launcher position");
+                }
             }
-            else if (def.HasDedicatedPanel)
-            {
-                AddMutedLabel(_pageContent,
-                    "A dedicated interface exists, but the Hub will not guess how to open it until this mod exposes the bridge action.");
-            }
-            else
-            {
-                AddMutedLabel(_pageContent,
-                    "No dedicated panel is required for this module. Use its ordinary controls until bridge actions are exposed.");
-            }
-
-            if (!string.IsNullOrEmpty(_view.LastActionResult))
-                AddMutedLabel(_pageContent, _view.LastActionResult);
-
-            AddSpacer(_pageContent, 6f);
-            AddSectionLabel(_pageContent, "COMMON SETTINGS");
-            BuildSettings(moduleId, bridge == null ? null : bridge.CachedBasicSettings);
-
-            AddSpacer(_pageContent, 6f);
-            AddRowButton(_pageContent, "Advanced  " + (_view.ShowAdvanced ? "[-]" : "[+]"), 22f, _view.ShowAdvanced,
-                delegate { _view.SetAdvanced(!_view.ShowAdvanced); QueuePageRebuild(); });
-            if (_view.ShowAdvanced)
-                BuildSettings(moduleId, bridge == null ? null : bridge.CachedAdvancedSettings);
 
             if (GetDeveloperEnabled != null && GetDeveloperEnabled())
             {
-                AddRowButton(_pageContent, "Developer  " + (_view.ShowDeveloper ? "[-]" : "[+]"), 22f, _view.ShowDeveloper,
-                    delegate { _view.SetDeveloper(!_view.ShowDeveloper); QueuePageRebuild(); });
+                AddSpacer(_pageContent, SuiteUiTheme.SectionGap);
+                AddDisclosureRow(_pageContent, "Developer", _view.ShowDeveloper,
+                    delegate
+                    {
+                        MarkWindowActivated();
+                        _view.SetDeveloper(!_view.ShowDeveloper);
+                        QueuePageRebuild();
+                    });
                 if (_view.ShowDeveloper)
                 {
-                    BuildSettings(moduleId, bridge == null ? null : bridge.CachedDeveloperSettings);
-                    if (bridge != null && !string.IsNullOrEmpty(bridge.LastError))
-                        AddWarningLabel(_pageContent, "Last bridge error: " + bridge.LastError);
+                    _moduleVersionLabel = AddMutedLabel(_pageContent, "Version: " + runtime.Version);
+                    BuildSettings(moduleId, developer);
+                    _developerBridgeErrorLabel = AddWarningLabel(_pageContent, string.Empty);
+                    SetOptionalText(_developerBridgeErrorLabel,
+                        bridge != null && !string.IsNullOrEmpty(bridge.LastError) ? "Last bridge error: " + bridge.LastError : string.Empty);
                 }
             }
+        }
+
+        // Only argument-free actions with already-established player semantics are rendered here.
+        // In particular, Nemesis 'select' intentionally remains transport-only because it requires
+        // a current candidate name; the Hub must not invent a text-entry or candidate-selection API.
+        private void BuildCompactModuleActions(string moduleId, SuiteModuleDescriptor runtime)
+        {
+            if (runtime == null || !string.Equals(moduleId, "nemesis", StringComparison.Ordinal)) return;
+            if (runtime.HasAction("clear")) AddModuleActionButton(moduleId, "clear", "Clear rival");
+            if (runtime.HasAction("confirm")) AddModuleActionButton(moduleId, "confirm", "Confirm change");
+            if (runtime.HasAction("cancel")) AddModuleActionButton(moduleId, "cancel", "Cancel change");
+        }
+
+        private void AddModuleActionButton(string moduleId, string actionId, string label)
+        {
+            string capturedModule = moduleId;
+            string capturedAction = actionId;
+            AddRowButton(_pageContent, label, SuiteUiTheme.RowHeight, false, delegate
+            {
+                MarkWindowActivated();
+                string result;
+                ErenshorSuiteHubPlugin.TryInvokeModuleAction(capturedModule, capturedAction, string.Empty, out result);
+                _view.SetActionResult(result);
+                QueueRebuildIfContentChanged();
+            });
         }
 
         private void BuildSettings(string moduleId, List<SuiteSettingDescriptor> settings)
         {
-            if (settings == null || settings.Count == 0)
-            {
-                AddMutedLabel(_pageContent, "No settings advertised at this level.");
-                return;
-            }
+            if (settings == null || settings.Count == 0) return;
 
             for (int i = 0; i < settings.Count; i++)
             {
                 SuiteSettingDescriptor s = settings[i];
-                if (s.Kind == SuiteSettingKind.Bool && s.Mutable)
+                string capturedModule = moduleId;
+                string capturedId = s.Id;
+                SettingValueVisual visual;
+
+                if (s.Kind == SuiteSettingKind.Bool)
                 {
-                    bool current = string.Equals(s.Value, "true", StringComparison.OrdinalIgnoreCase);
-                    SuiteSettingDescriptor captured = s;
-                    string capturedModule = moduleId;
-                    AddToggleRow(_pageContent, s.Label, current, delegate
+                    bool current = SuiteSettingDisplayPolicy.IsOn(s.Value);
+                    if (s.Mutable)
                     {
-                        bool next = !string.Equals(captured.Value, "true", StringComparison.OrdinalIgnoreCase);
-                        string result;
-                        if (ErenshorSuiteHubPlugin.TrySetModuleSetting(capturedModule, captured.Id,
-                                next ? "true" : "false", out result))
-                            captured.Value = next ? "true" : "false";
-                        _view.SetActionResult(result);
-                        QueuePageRebuild();
-                    });
+                        visual = AddToggleRow(_pageContent, s.Label, current, delegate
+                        {
+                            MarkWindowActivated();
+                            ToggleSetting(capturedModule, capturedId);
+                        });
+                    }
+                    else
+                    {
+                        visual = AddBooleanStateRow(_pageContent, s.Label, current);
+                    }
                 }
                 else if (s.Kind == SuiteSettingKind.Choice && s.Mutable && s.Options.Count > 0)
                 {
-                    SuiteSettingDescriptor captured = s;
-                    string capturedModule = moduleId;
-                    AddChoiceRow(_pageContent, s.Label, s.Value, delegate
+                    visual = AddChoiceRow(_pageContent, s.Label, s.Value, delegate
                     {
-                        CycleChoice(capturedModule, captured, 1);
-                        QueuePageRebuild();
+                        MarkWindowActivated();
+                        CycleChoice(capturedModule, capturedId, 1);
                     });
                 }
                 else
                 {
-                    AddBodyLabel(_pageContent, s.Label + ": " + s.Value + (s.Mutable ? "" : " (read-only)"));
+                    visual = AddReadOnlySettingRow(_pageContent, s.Label, s.Value,
+                        s.Mutable ? " (display only)" : " (read-only)");
                 }
+
+                visual.Tier = s.Tier;
+                visual.SettingId = s.Id;
+                _settingVisuals[SettingBindingKey(s.Tier, s.Id)] = visual;
             }
         }
 
-        private void CycleChoice(string moduleId, SuiteSettingDescriptor s, int direction)
+        private void ToggleSetting(string moduleId, string settingId)
         {
-            if (s.Options.Count == 0) return;
-            int index = s.Options.IndexOf(s.Value);
-            if (index < 0) index = 0;
-            index = (index + direction + s.Options.Count) % s.Options.Count;
-            string nextValue = s.Options[index];
+            AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(moduleId);
+            SuiteSettingDescriptor current = bridge == null ? null : bridge.FindCachedSetting(settingId);
+            if (current == null || current.Kind != SuiteSettingKind.Bool)
+            {
+                _view.SetActionResult("Setting is no longer available");
+                QueuePageRebuild();
+                return;
+            }
+
+            bool next = !SuiteSettingDisplayPolicy.IsOn(current.Value);
             string result;
-            if (ErenshorSuiteHubPlugin.TrySetModuleSetting(moduleId, s.Id, nextValue, out result))
-                s.Value = nextValue;
-            _view.SetActionResult(result);
+            bool succeeded = ErenshorSuiteHubPlugin.TrySetModuleSetting(
+                moduleId, settingId, next ? "true" : "false", out result);
+            _view.SetActionResult(SuiteSettingMutationPolicy.VisibleResult(succeeded, result));
+            // Success re-reads authoritative module state synchronously; failure still needs its
+            // rejection text surfaced immediately. Both paths reconcile retained dynamic bindings
+            // now, while genuine schema changes use the normal atomic rebuild path.
+            SuiteSettingMutationRefreshPlan plan = SuiteSettingMutationPolicy.Resolve(succeeded);
+            if (plan.RefreshRetainedValues) QueueRebuildIfContentChanged();
+        }
+
+        private void CycleChoice(string moduleId, string settingId, int direction)
+        {
+            AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(moduleId);
+            SuiteSettingDescriptor current = bridge == null ? null : bridge.FindCachedSetting(settingId);
+            if (current == null || current.Kind != SuiteSettingKind.Choice || current.Options.Count == 0)
+            {
+                _view.SetActionResult("Setting is no longer available");
+                QueuePageRebuild();
+                return;
+            }
+
+            int index = current.Options.IndexOf(current.Value);
+            if (index < 0) index = 0;
+            index = (index + direction + current.Options.Count) % current.Options.Count;
+            string nextValue = current.Options[index];
+            string result;
+            bool succeeded = ErenshorSuiteHubPlugin.TrySetModuleSetting(moduleId, settingId, nextValue, out result);
+            _view.SetActionResult(SuiteSettingMutationPolicy.VisibleResult(succeeded, result));
+            SuiteSettingMutationRefreshPlan plan = SuiteSettingMutationPolicy.Resolve(succeeded);
+            if (plan.RefreshRetainedValues) QueueRebuildIfContentChanged();
+        }
+
+        private void RefreshDynamicPageValues()
+        {
+            if (_window == null || _pageContent == null || _view.IsOverviewSelected) return;
+
+            SuiteModuleDescriptor runtime = ErenshorSuiteHubPlugin.GetRegisteredModule(_view.SelectedModuleId);
+            AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(_view.SelectedModuleId);
+            bool layoutDirty = false;
+
+            if (runtime == null)
+            {
+                layoutDirty |= SetOptionalText(_bridgeErrorLabel,
+                    bridge != null && !string.IsNullOrEmpty(bridge.LastError) ? "Bridge rejected: " + bridge.LastError : string.Empty);
+            }
+            else
+            {
+                if (_moduleVersionLabel != null)
+                {
+                    string next = "Version: " + (runtime.Version ?? string.Empty);
+                    if (!string.Equals(_moduleVersionLabel.text, next, StringComparison.Ordinal))
+                    {
+                        _moduleVersionLabel.text = next;
+                        layoutDirty = true;
+                    }
+                }
+                layoutDirty |= SetOptionalText(_statusLabel, string.IsNullOrEmpty(runtime.Status) ? "Available" : runtime.Status);
+                layoutDirty |= SetOptionalText(_warningLabel, runtime.Warning);
+            }
+
+            layoutDirty |= SetOptionalText(_actionResultLabel, _view.LastActionResult);
+            layoutDirty |= SetOptionalText(_developerBridgeErrorLabel,
+                bridge != null && !string.IsNullOrEmpty(bridge.LastError) ? "Last bridge error: " + bridge.LastError : string.Empty);
+
+            if (bridge != null)
+            {
+                layoutDirty |= RefreshSettingVisuals(bridge.CachedBasicSettings);
+                layoutDirty |= RefreshSettingVisuals(bridge.CachedAdvancedSettings);
+                layoutDirty |= RefreshSettingVisuals(bridge.CachedDeveloperSettings);
+            }
+
+            if (layoutDirty && _pageContent != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(_pageContent);
+        }
+
+        private bool RefreshSettingVisuals(List<SuiteSettingDescriptor> settings)
+        {
+            if (settings == null) return false;
+            bool changed = false;
+            for (int i = 0; i < settings.Count; i++)
+            {
+                SuiteSettingDescriptor s = settings[i];
+                SettingValueVisual visual;
+                if (!_settingVisuals.TryGetValue(SettingBindingKey(s.Tier, s.Id), out visual)) continue;
+                changed |= ApplySettingValue(visual, s.Value);
+            }
+            return changed;
+        }
+
+        private static bool ApplySettingValue(SettingValueVisual visual, string value)
+        {
+            if (visual == null || visual.ValueLabel == null) return false;
+            value = value ?? string.Empty;
+            string nextText;
+
+            if (visual.Kind == SuiteSettingKind.Bool)
+            {
+                bool on = SuiteSettingDisplayPolicy.IsOn(value);
+                nextText = SuiteSettingDisplayPolicy.BooleanButtonText(visual.SettingLabel, on);
+                Color nextColor = on ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+                if (visual.StateBackground != null) visual.StateBackground.color = nextColor;
+                if (visual.Button != null) SetButtonColors(visual.Button, nextColor);
+                visual.ValueLabel.color = on ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
+            }
+            else if (visual.Kind == SuiteSettingKind.Choice)
+            {
+                nextText = value + "  >";
+            }
+            else
+            {
+                nextText = visual.Prefix + value + visual.Suffix;
+            }
+
+            if (string.Equals(visual.ValueLabel.text, nextText, StringComparison.Ordinal)) return false;
+            visual.ValueLabel.text = nextText;
+            return true;
+        }
+
+        private static string SettingBindingKey(SuiteSettingTier tier, string id)
+        {
+            return ((int)tier).ToString() + ":" + (id ?? string.Empty);
+        }
+
+        private void MarkWindowActivated()
+        {
+            _windowActivatedAt = Time.realtimeSinceStartup;
+        }
+
+        private void FitWindowToCurrentStructure()
+        {
+            if (_windowRect == null || _pageContent == null) return;
+            float structuralContent = EstimateCurrentStructuralContentHeight();
+            float targetHeight = SuiteHubLayoutPolicy.ResolveWindowHeight(
+                structuralContent, _windowMaximumEnvelope.y, Screen.height);
+            Vector2 currentSize = _windowRect.sizeDelta;
+            if (Math.Abs(currentSize.y - targetHeight) < 0.5f) return;
+
+            SuiteRect resized = SuiteUiGeometry.ResizeWindowKeepingTop(
+                new SuiteRect(_windowRect.anchoredPosition.x, _windowRect.anchoredPosition.y, currentSize.x, currentSize.y),
+                targetHeight, Screen.width, Screen.height);
+            _windowRect.sizeDelta = new Vector2(currentSize.x, resized.Height);
+            _windowRestorePos = new Vector2(resized.X, resized.Y);
+            _windowRect.anchoredPosition = _windowRestorePos;
+            _windowRestoreFrames = RestoreFrameBudget;
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_windowRect);
+            SuiteHubDiagnostics.Log("window structural-fit height=" + resized.Height +
+                " modelContent=" + structuralContent);
+        }
+
+        private Vector2 ResolveInitialCompactWindowSize(Vector2 maximumEnvelope)
+        {
+            // Never ask the ScrollRect's stretched content root how tall the outer window should
+            // be. Its preferred height may inherit the already-reserved maximum envelope. Instead
+            // use the same explicit structural model used for module switches/disclosure changes.
+            float structuralContent = EstimateCurrentStructuralContentHeight();
+            float height = SuiteHubLayoutPolicy.ResolveWindowHeight(
+                structuralContent, maximumEnvelope.y, Screen.height);
+            return new Vector2(maximumEnvelope.x, height);
+        }
+
+        private float EstimateCurrentStructuralContentHeight()
+        {
+            bool developerEnabled = GetDeveloperEnabled != null && GetDeveloperEnabled();
+            List<ModPresence> mods = CurrentMods();
+            if (_view.IsOverviewSelected)
+            {
+                int installed = 0;
+                for (int i = 0; i < mods.Count; i++) if (mods[i].Installed) installed++;
+                return SuiteHubLayoutPolicy.EstimateOverviewContentHeight(installed, developerEnabled);
+            }
+
+            ModPresence presence = default(ModPresence);
+            bool found = false;
+            for (int i = 0; i < mods.Count; i++)
+            {
+                if (!mods[i].Installed || !string.Equals(mods[i].ModuleId, _view.SelectedModuleId, StringComparison.Ordinal))
+                    continue;
+                presence = mods[i];
+                found = true;
+                break;
+            }
+            if (!found || presence.Definition == null)
+            {
+                int installed = 0;
+                for (int i = 0; i < mods.Count; i++) if (mods[i].Installed) installed++;
+                return SuiteHubLayoutPolicy.EstimateOverviewContentHeight(installed, developerEnabled);
+            }
+
+            SuiteModuleDescriptor runtime = ErenshorSuiteHubPlugin.GetRegisteredModule(_view.SelectedModuleId);
+            AuraModuleBridge bridge = ErenshorSuiteHubPlugin.GetModuleBridge(_view.SelectedModuleId);
+            return SuiteHubLayoutPolicy.EstimateModuleContentHeight(
+                _view.SelectedModuleId,
+                runtime != null,
+                runtime == null ? null : runtime.Actions,
+                bridge == null ? null : bridge.CachedBasicSettings,
+                bridge == null ? null : bridge.CachedAdvancedSettings,
+                bridge == null ? null : bridge.CachedDeveloperSettings,
+                _view.ShowAdvanced,
+                _view.ShowDeveloper,
+                developerEnabled);
         }
 
         // ---- widget helpers ---------------------------------------------------------------------
@@ -1099,14 +1645,25 @@ namespace ErenshorSuiteHub
             r.offsetMax = Vector2.zero;
         }
 
-        private static void SetButtonColors(Button b)
+        private static void AddCrispBorder(GameObject go, Color color)
+        {
+            if (go == null) return;
+            Outline outline = go.AddComponent<Outline>();
+            outline.effectColor = color;
+            outline.effectDistance = new Vector2(SuiteUiTheme.BorderPixels, -SuiteUiTheme.BorderPixels);
+            outline.useGraphicAlpha = false;
+        }
+
+        private static void SetButtonColors(Button b, Color normal)
         {
             ColorBlock c = b.colors;
-            c.normalColor = Color.white;
-            c.highlightedColor = new Color(1.25f, 1.25f, 1.25f, 1f);
-            c.pressedColor = new Color(0.8f, 0.8f, 0.8f, 1f);
+            c.normalColor = normal;
+            c.highlightedColor = SuiteUiTheme.ControlHover;
+            c.pressedColor = SuiteUiTheme.ControlPressed;
+            c.disabledColor = SuiteUiTheme.HeaderBackground;
             c.fadeDuration = 0.05f;
             b.colors = c;
+            if (b.targetGraphic != null) b.targetGraphic.color = normal;
         }
 
         private static TextMeshProUGUI NewLabel(string name, Transform parent, string text, float size, FontStyles style)
@@ -1117,7 +1674,7 @@ namespace ErenshorSuiteHub
             t.text = text;
             t.fontSize = size;
             t.fontStyle = style;
-            t.color = new Color(0.88f, 0.92f, 0.91f, 1f);
+            t.color = SuiteUiTheme.TextPrimary;
             t.alignment = TextAlignmentOptions.Left;
             // Labels must never eat clicks intended for the control underneath them.
             t.raycastTarget = false;
@@ -1139,32 +1696,33 @@ namespace ErenshorSuiteHub
             t.color = color;
             t.enableWordWrapping = true;
             LayoutElement le = t.gameObject.AddComponent<LayoutElement>();
-            le.minHeight = 16f;
-            // ContentSizeFitter on the parent needs a preferred height; let TMP report it.
+            le.minHeight = SuiteUiMetrics.TextRowHeight;
+            // Leave preferredHeight unset so the parent VerticalLayoutGroup can query TMP's own
+            // preferred height (including wrapping). A child ContentSizeFitter would fight the
+            // parent now that childControlHeight=true.
             le.preferredHeight = -1f;
-            ContentSizeFitter fitter = t.gameObject.AddComponent<ContentSizeFitter>();
-            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            le.flexibleHeight = 0f;
             return t;
         }
 
         private static void AddSectionLabel(RectTransform parent, string text)
         {
-            AddTextRow(parent, text, 11f, new Color(0.56f, 0.78f, 0.88f, 1f), FontStyles.Bold);
+            AddTextRow(parent, text, 11f, SuiteUiTheme.TextSecondary, FontStyles.Bold);
         }
 
-        private static void AddBodyLabel(RectTransform parent, string text)
+        private static TextMeshProUGUI AddBodyLabel(RectTransform parent, string text)
         {
-            AddTextRow(parent, text, 11f, new Color(0.88f, 0.92f, 0.91f, 1f), FontStyles.Normal);
+            return AddTextRow(parent, text, 11f, SuiteUiTheme.TextPrimary, FontStyles.Normal);
         }
 
-        private static void AddMutedLabel(RectTransform parent, string text)
+        private static TextMeshProUGUI AddMutedLabel(RectTransform parent, string text)
         {
-            AddTextRow(parent, text, 10f, new Color(0.63f, 0.73f, 0.74f, 1f), FontStyles.Normal);
+            return AddTextRow(parent, text, 10f, SuiteUiTheme.TextSecondary, FontStyles.Normal);
         }
 
-        private static void AddWarningLabel(RectTransform parent, string text)
+        private static TextMeshProUGUI AddWarningLabel(RectTransform parent, string text)
         {
-            AddTextRow(parent, text, 10f, new Color(1f, 0.80f, 0.42f, 1f), FontStyles.Normal);
+            return AddTextRow(parent, text, 10f, SuiteUiTheme.TextWarning, FontStyles.Normal);
         }
 
         // References kept for a persistent nav row so its selected/unselected style can be applied
@@ -1172,14 +1730,94 @@ namespace ErenshorSuiteHub
         private struct NavRowVisual
         {
             internal Image Background;
+            internal Button Button;
             internal TextMeshProUGUI Label;
+        }
+
+        private sealed class SettingValueVisual
+        {
+            internal SuiteSettingTier Tier;
+            internal string SettingId;
+            internal SuiteSettingKind Kind;
+            internal TextMeshProUGUI ValueLabel;
+            internal Image StateBackground;
+            internal Button Button;
+            internal string SettingLabel = string.Empty;
+            internal string Prefix = string.Empty;
+            internal string Suffix = string.Empty;
+        }
+
+        private sealed class PageBindingSnapshot
+        {
+            internal TextMeshProUGUI ModuleVersion;
+            internal TextMeshProUGUI Status;
+            internal TextMeshProUGUI Warning;
+            internal TextMeshProUGUI ActionResult;
+            internal TextMeshProUGUI BridgeError;
+            internal TextMeshProUGUI DeveloperBridgeError;
+            internal Dictionary<string, SettingValueVisual> Settings;
+        }
+
+        private PageBindingSnapshot CapturePageBindings()
+        {
+            return new PageBindingSnapshot
+            {
+                ModuleVersion = _moduleVersionLabel,
+                Status = _statusLabel,
+                Warning = _warningLabel,
+                ActionResult = _actionResultLabel,
+                BridgeError = _bridgeErrorLabel,
+                DeveloperBridgeError = _developerBridgeErrorLabel,
+                Settings = _settingVisuals
+            };
+        }
+
+        private void RestorePageBindings(PageBindingSnapshot snapshot)
+        {
+            if (snapshot == null) { ClearPageBindings(); return; }
+            _moduleVersionLabel = snapshot.ModuleVersion;
+            _statusLabel = snapshot.Status;
+            _warningLabel = snapshot.Warning;
+            _actionResultLabel = snapshot.ActionResult;
+            _bridgeErrorLabel = snapshot.BridgeError;
+            _developerBridgeErrorLabel = snapshot.DeveloperBridgeError;
+            _settingVisuals = snapshot.Settings ?? new Dictionary<string, SettingValueVisual>(StringComparer.Ordinal);
+        }
+
+        private void BeginPageBindings()
+        {
+            _moduleVersionLabel = null;
+            _statusLabel = null;
+            _warningLabel = null;
+            _actionResultLabel = null;
+            _bridgeErrorLabel = null;
+            _developerBridgeErrorLabel = null;
+            _settingVisuals = new Dictionary<string, SettingValueVisual>(StringComparer.Ordinal);
+        }
+
+        private void ClearPageBindings()
+        {
+            BeginPageBindings();
+        }
+
+        private static bool SetOptionalText(TextMeshProUGUI label, string text)
+        {
+            if (label == null) return false;
+            text = text ?? string.Empty;
+            bool shouldShow = text.Length > 0;
+            bool changed = !string.Equals(label.text, text, StringComparison.Ordinal) ||
+                label.gameObject.activeSelf != shouldShow;
+            if (!changed) return false;
+            label.text = text;
+            label.gameObject.SetActive(shouldShow);
+            return true;
         }
 
         private static NavRowVisual AddNavRow(RectTransform parent, string text, bool selected,
             UnityEngine.Events.UnityAction action)
         {
             NavRowVisual row = new NavRowVisual();
-            row.Background = AddRowButton(parent, text, 24f, selected, action);
+            row.Background = AddRowButton(parent, text, SuiteUiTheme.RowHeight, selected, action, out row.Button);
             row.Label = row.Background != null ? row.Background.GetComponentInChildren<TextMeshProUGUI>() : null;
             return row;
         }
@@ -1187,98 +1825,202 @@ namespace ErenshorSuiteHub
         private static Image AddRowButton(RectTransform parent, string text, float height, bool selected,
             UnityEngine.Events.UnityAction action)
         {
+            Button ignored;
+            return AddRowButton(parent, text, height, selected, action, out ignored);
+        }
+
+        private static Image AddRowButton(RectTransform parent, string text, float height, bool selected,
+            UnityEngine.Events.UnityAction action, out Button button)
+        {
             GameObject go = NewUi("RowButton", parent);
-            Image img = AddImage(go, selected
-                ? new Color(0.07f, 0.28f, 0.34f, 0.98f)
-                : new Color(0.035f, 0.17f, 0.22f, 0.90f));
+            Color normal = selected ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+            Image img = AddImage(go, normal);
             img.raycastTarget = true;
+            AddCrispBorder(go, SuiteUiTheme.ControlBorder);
 
             LayoutElement le = go.AddComponent<LayoutElement>();
             le.minHeight = height;
             le.preferredHeight = height;
 
-            Button b = go.AddComponent<Button>();
-            b.targetGraphic = img;
-            SetButtonColors(b);
-            b.onClick.AddListener(action);
+            button = go.AddComponent<Button>();
+            button.targetGraphic = img;
+            SetButtonColors(button, normal);
+            button.onClick.AddListener(action);
 
             TextMeshProUGUI label = NewLabel("Label", go.transform, text, 11f, FontStyles.Normal);
             RectTransform lr = label.rectTransform;
             lr.anchorMin = Vector2.zero;
             lr.anchorMax = Vector2.one;
-            lr.offsetMin = new Vector2(6f, 0f);
-            lr.offsetMax = new Vector2(-6f, 0f);
+            lr.offsetMin = new Vector2(8f, 0f);
+            lr.offsetMax = new Vector2(-8f, 0f);
             label.alignment = TextAlignmentOptions.Left;
-            label.color = selected ? new Color(0.88f, 1f, 0.98f, 1f) : new Color(0.84f, 0.94f, 1f, 1f);
+            label.color = selected ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
             return img;
         }
 
-        // A bool setting row: label on the left, an unmistakable colored ON/OFF pill on the right
-        // that a plain status label never has. The whole row is one Button so the click target is
-        // generous, not just the small pill text.
-        private static void AddToggleRow(RectTransform parent, string label, bool on, UnityEngine.Events.UnityAction action)
+        // Disclosure is semantically different from boolean state. The visible affordance is a
+        // small chevron built from ordinary Image bars, so it does not depend on a particular TMP
+        // font containing triangle glyphs. The entire row is the hit target.
+        private static void AddDisclosureRow(RectTransform parent, string label, bool expanded,
+            UnityEngine.Events.UnityAction action)
         {
-            const float height = 24f;
-            const float pillWidth = 46f;
-
-            GameObject go = NewUi("ToggleRow", parent);
-            Image rowImg = AddImage(go, new Color(0.035f, 0.17f, 0.22f, 0.90f));
+            GameObject go = NewUi("DisclosureRow", parent);
+            Color normal = expanded ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+            Image rowImg = AddImage(go, normal);
             rowImg.raycastTarget = true;
+            AddCrispBorder(go, expanded ? SuiteUiTheme.PanelBorder : SuiteUiTheme.ControlBorder);
 
             LayoutElement le = go.AddComponent<LayoutElement>();
-            le.minHeight = height;
-            le.preferredHeight = height;
+            le.minHeight = SuiteUiTheme.DisclosureRowHeight;
+            le.preferredHeight = SuiteUiTheme.DisclosureRowHeight;
 
             Button b = go.AddComponent<Button>();
             b.targetGraphic = rowImg;
-            SetButtonColors(b);
+            SetButtonColors(b, normal);
             b.onClick.AddListener(action);
+
+            GameObject icon = NewUi("Chevron", go.transform);
+            RectTransform ir = icon.GetComponent<RectTransform>();
+            ir.anchorMin = new Vector2(0f, 0.5f);
+            ir.anchorMax = new Vector2(0f, 0.5f);
+            ir.pivot = new Vector2(0.5f, 0.5f);
+            ir.sizeDelta = new Vector2(14f, 14f);
+            ir.anchoredPosition = new Vector2(11f, 0f);
+            AddChevronBars(icon.transform, expanded);
 
             TextMeshProUGUI text = NewLabel("Label", go.transform, label, 11f, FontStyles.Normal);
             RectTransform tr = text.rectTransform;
             tr.anchorMin = Vector2.zero;
             tr.anchorMax = Vector2.one;
-            tr.offsetMin = new Vector2(8f, 0f);
-            tr.offsetMax = new Vector2(-(pillWidth + 10f), 0f);
+            tr.offsetMin = new Vector2(26f, 0f);
+            tr.offsetMax = new Vector2(-8f, 0f);
             text.alignment = TextAlignmentOptions.Left;
-            text.color = new Color(0.84f, 0.94f, 1f, 1f);
-
-            GameObject pill = NewUi("Pill", go.transform);
-            Image pillImg = AddImage(pill, on
-                ? new Color(0.20f, 0.62f, 0.34f, 1f)
-                : new Color(0.30f, 0.32f, 0.34f, 1f));
-            pillImg.raycastTarget = false; // the row Button already covers the whole area
-            RectTransform pr = pill.GetComponent<RectTransform>();
-            pr.anchorMin = new Vector2(1f, 0.5f);
-            pr.anchorMax = new Vector2(1f, 0.5f);
-            pr.pivot = new Vector2(1f, 0.5f);
-            pr.sizeDelta = new Vector2(pillWidth, 16f);
-            pr.anchoredPosition = new Vector2(-6f, 0f);
-
-            TextMeshProUGUI pillLabel = NewLabel("PillLabel", pill.transform, on ? "ON" : "OFF", 10f, FontStyles.Bold);
-            Stretch(pillLabel.rectTransform);
-            pillLabel.alignment = TextAlignmentOptions.Center;
-            pillLabel.color = Color.white;
+            text.color = expanded ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
         }
 
-        // A choice setting row: label on the left, current value + a ">" cycle affordance on the
-        // right in its own chip, distinct from plain body text.
-        private static void AddChoiceRow(RectTransform parent, string label, string value, UnityEngine.Events.UnityAction action)
+        private static void AddChevronBars(Transform parent, bool expanded)
         {
-            const float height = 24f;
-            const float chipWidth = 96f;
+            if (expanded)
+            {
+                // Down chevron: two upper arms meet at the lower center.
+                AddChevronBar(parent, new Vector2(-2.3f, 1f), 45f);
+                AddChevronBar(parent, new Vector2(2.3f, 1f), -45f);
+            }
+            else
+            {
+                // Right chevron: two left arms meet at the right center.
+                AddChevronBar(parent, new Vector2(-1.5f, 2.3f), 45f);
+                AddChevronBar(parent, new Vector2(-1.5f, -2.3f), -45f);
+            }
+        }
 
-            GameObject go = NewUi("ChoiceRow", parent);
-            Image rowImg = AddImage(go, new Color(0.035f, 0.17f, 0.22f, 0.90f));
+        private static void AddChevronBar(Transform parent, Vector2 position, float rotation)
+        {
+            GameObject bar = NewUi("Bar", parent);
+            Image image = AddImage(bar, SuiteUiTheme.TextSecondary);
+            image.raycastTarget = false;
+            RectTransform r = bar.GetComponent<RectTransform>();
+            r.anchorMin = new Vector2(0.5f, 0.5f);
+            r.anchorMax = new Vector2(0.5f, 0.5f);
+            r.pivot = new Vector2(0.5f, 0.5f);
+            r.sizeDelta = new Vector2(2f, 7f);
+            r.anchoredPosition = position;
+            r.localRotation = Quaternion.Euler(0f, 0f, rotation);
+        }
+
+        // Mutable bools follow the dedicated PvP panel convention: the state is part of the
+        // clickable control text itself ("Label [ON]" / "Label [OFF]"), not a detached checkbox or
+        // ambiguous color-only pill. Color remains a secondary cue.
+        private static SettingValueVisual AddToggleRow(RectTransform parent, string label, bool on,
+            UnityEngine.Events.UnityAction action)
+        {
+            GameObject go = NewUi("ToggleRow", parent);
+            Color normal = on ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+            Image rowImg = AddImage(go, normal);
             rowImg.raycastTarget = true;
+            AddCrispBorder(go, SuiteUiTheme.ControlBorder);
 
             LayoutElement le = go.AddComponent<LayoutElement>();
-            le.minHeight = height;
-            le.preferredHeight = height;
+            le.minHeight = SuiteUiTheme.RowHeight;
+            le.preferredHeight = SuiteUiTheme.RowHeight;
 
             Button b = go.AddComponent<Button>();
             b.targetGraphic = rowImg;
-            SetButtonColors(b);
+            SetButtonColors(b, normal);
+            b.onClick.AddListener(action);
+
+            TextMeshProUGUI text = NewLabel("Label", go.transform,
+                SuiteSettingDisplayPolicy.BooleanButtonText(label, on), 11f, FontStyles.Bold);
+            RectTransform tr = text.rectTransform;
+            tr.anchorMin = Vector2.zero;
+            tr.anchorMax = Vector2.one;
+            tr.offsetMin = new Vector2(8f, 0f);
+            tr.offsetMax = new Vector2(-8f, 0f);
+            text.alignment = TextAlignmentOptions.Left;
+            text.color = on ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
+
+            return new SettingValueVisual
+            {
+                ValueLabel = text,
+                StateBackground = rowImg,
+                Button = b,
+                SettingLabel = label ?? string.Empty,
+                Kind = SuiteSettingKind.Bool
+            };
+        }
+
+        // Read-only booleans preserve the same unambiguous text shape without pretending the row
+        // is interactive.
+        private static SettingValueVisual AddBooleanStateRow(RectTransform parent, string label, bool on)
+        {
+            GameObject go = NewUi("BooleanStateRow", parent);
+            Color normal = on ? SuiteUiTheme.SelectedBackground : SuiteUiTheme.ControlBackground;
+            Image rowImg = AddImage(go, normal);
+            rowImg.raycastTarget = false;
+            AddCrispBorder(go, SuiteUiTheme.ControlBorder);
+
+            LayoutElement le = go.AddComponent<LayoutElement>();
+            le.minHeight = SuiteUiTheme.RowHeight;
+            le.preferredHeight = SuiteUiTheme.RowHeight;
+
+            TextMeshProUGUI text = NewLabel("Label", go.transform,
+                SuiteSettingDisplayPolicy.BooleanButtonText(label, on), 11f, FontStyles.Normal);
+            RectTransform tr = text.rectTransform;
+            tr.anchorMin = Vector2.zero;
+            tr.anchorMax = Vector2.one;
+            tr.offsetMin = new Vector2(8f, 0f);
+            tr.offsetMax = new Vector2(-8f, 0f);
+            text.alignment = TextAlignmentOptions.Left;
+            text.color = on ? SuiteUiTheme.TextAccent : SuiteUiTheme.TextPrimary;
+
+            return new SettingValueVisual
+            {
+                ValueLabel = text,
+                StateBackground = rowImg,
+                SettingLabel = label ?? string.Empty,
+                Kind = SuiteSettingKind.Bool
+            };
+        }
+
+        // A choice setting row: label on the left, current value + a simple cycle affordance on the
+        // right in its own chip, distinct from both disclosure and boolean state.
+        private static SettingValueVisual AddChoiceRow(RectTransform parent, string label, string value,
+            UnityEngine.Events.UnityAction action)
+        {
+            const float chipWidth = 96f;
+
+            GameObject go = NewUi("ChoiceRow", parent);
+            Image rowImg = AddImage(go, SuiteUiTheme.ControlBackground);
+            rowImg.raycastTarget = true;
+            AddCrispBorder(go, SuiteUiTheme.ControlBorder);
+
+            LayoutElement le = go.AddComponent<LayoutElement>();
+            le.minHeight = SuiteUiTheme.RowHeight;
+            le.preferredHeight = SuiteUiTheme.RowHeight;
+
+            Button b = go.AddComponent<Button>();
+            b.targetGraphic = rowImg;
+            SetButtonColors(b, SuiteUiTheme.ControlBackground);
             b.onClick.AddListener(action);
 
             TextMeshProUGUI text = NewLabel("Label", go.transform, label, 11f, FontStyles.Normal);
@@ -1288,11 +2030,12 @@ namespace ErenshorSuiteHub
             tr.offsetMin = new Vector2(8f, 0f);
             tr.offsetMax = new Vector2(-(chipWidth + 10f), 0f);
             text.alignment = TextAlignmentOptions.Left;
-            text.color = new Color(0.84f, 0.94f, 1f, 1f);
+            text.color = SuiteUiTheme.TextPrimary;
 
-            GameObject chip = NewUi("Chip", go.transform);
-            Image chipImg = AddImage(chip, new Color(0.12f, 0.38f, 0.48f, 0.95f));
+            GameObject chip = NewUi("Choice", go.transform);
+            Image chipImg = AddImage(chip, SuiteUiTheme.SelectedBackground);
             chipImg.raycastTarget = false;
+            AddCrispBorder(chip, SuiteUiTheme.ControlBorder);
             RectTransform cr = chip.GetComponent<RectTransform>();
             cr.anchorMin = new Vector2(1f, 0.5f);
             cr.anchorMax = new Vector2(1f, 0.5f);
@@ -1300,10 +2043,27 @@ namespace ErenshorSuiteHub
             cr.sizeDelta = new Vector2(chipWidth, 18f);
             cr.anchoredPosition = new Vector2(-6f, 0f);
 
-            TextMeshProUGUI chipLabel = NewLabel("ChipLabel", chip.transform, value + "  >", 10f, FontStyles.Bold);
+            TextMeshProUGUI chipLabel = NewLabel("ChoiceLabel", chip.transform, (value ?? string.Empty) + "  >", 10f, FontStyles.Bold);
             Stretch(chipLabel.rectTransform);
             chipLabel.alignment = TextAlignmentOptions.Center;
-            chipLabel.color = Color.white;
+            chipLabel.color = SuiteUiTheme.TextAccent;
+
+            return new SettingValueVisual { ValueLabel = chipLabel, StateBackground = chipImg, Kind = SuiteSettingKind.Choice };
+        }
+
+        private static SettingValueVisual AddReadOnlySettingRow(RectTransform parent, string label,
+            string value, string suffix)
+        {
+            string prefix = (label ?? string.Empty) + ": ";
+            suffix = suffix ?? string.Empty;
+            TextMeshProUGUI row = AddBodyLabel(parent, prefix + (value ?? string.Empty) + suffix);
+            return new SettingValueVisual
+            {
+                ValueLabel = row,
+                Prefix = prefix,
+                Suffix = suffix,
+                Kind = SuiteSettingKind.Text
+            };
         }
     }
 }

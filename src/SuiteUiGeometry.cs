@@ -41,14 +41,44 @@ namespace ErenshorSuiteHub
             return r;
         }
 
+        internal const float CompactWindowMinHeight = 230f;
+        internal const float WindowScreenMargin = 20f;
+
+        // The configured/default height is an envelope, not an always-reserved content area. The
+        // Hub resolves height from the selected page on structural changes; dynamic values do not resize it.
+        internal static float ResolveCompactWindowHeight(float preferredTotalHeight,
+            float maximumEnvelopeHeight, float screenHeight)
+        {
+            if (!Finite(maximumEnvelopeHeight) || maximumEnvelopeHeight <= 0f) maximumEnvelopeHeight = 430f;
+            if (!Finite(screenHeight) || screenHeight <= 0f) screenHeight = maximumEnvelopeHeight + WindowScreenMargin;
+            float screenCap = Math.Max(1f, screenHeight - WindowScreenMargin);
+            float maxHeight = Math.Min(maximumEnvelopeHeight, screenCap);
+            if (maxHeight <= 0f) maxHeight = 1f;
+            float minHeight = Math.Min(CompactWindowMinHeight, maxHeight);
+            if (!Finite(preferredTotalHeight) || preferredTotalHeight <= 0f) preferredTotalHeight = minHeight;
+            return Clamp(preferredTotalHeight, minHeight, maxHeight);
+        }
+
+        internal static SuiteRect ResizeWindowKeepingTop(SuiteRect current, float targetHeight,
+            float screenWidth, float screenHeight)
+        {
+            if (!Finite(targetHeight) || targetHeight <= 0f) targetHeight = CompactWindowMinHeight;
+            float oldTop = (Finite(current.Y) && Finite(current.Height)) ? current.Y + current.Height : 0f;
+            current.Height = targetHeight;
+            current.Y = oldTop - targetHeight;
+            return ClampWindow(current, screenWidth, screenHeight);
+        }
+
         internal static SuiteRect ClampWindow(SuiteRect r, float screenWidth, float screenHeight)
         {
-            float maxWidth = Math.Max(420f, screenWidth - 20f);
-            float maxHeight = Math.Max(300f, screenHeight - 20f);
+            float maxWidth = Math.Max(1f, screenWidth - WindowScreenMargin);
+            float minWidth = Math.Min(420f, maxWidth);
+            float maxHeight = Math.Max(1f, screenHeight - WindowScreenMargin);
+            float minHeight = Math.Min(CompactWindowMinHeight, maxHeight);
             if (!Finite(r.Width)) r.Width = 620f;
             if (!Finite(r.Height)) r.Height = 430f;
-            r.Width = Clamp(r.Width, 420f, maxWidth);
-            r.Height = Clamp(r.Height, 300f, maxHeight);
+            r.Width = Clamp(r.Width, minWidth, maxWidth);
+            r.Height = Clamp(r.Height, minHeight, maxHeight);
             if (!Finite(r.X)) r.X = 0f;
             if (!Finite(r.Y)) r.Y = 0f;
             r.X = Clamp(r.X, 0f, Math.Max(0f, screenWidth - r.Width));

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace ErenshorSuiteHub
@@ -113,6 +113,26 @@ namespace ErenshorSuiteHub
                 string action = descriptor.Actions[i];
                 if (!ValidId(action, 48)) { error = "invalid action id"; return false; }
                 if (!actionIds.Add(action)) { error = "duplicate action id"; return false; }
+            }
+            return true;
+        }
+
+        internal static bool ValidateUiState(SuiteUiStateDescriptor state, string expectedModuleId, out string error)
+        {
+            error = null;
+            if (state == null) { error = "ui state is null"; return false; }
+            if (state.ProtocolVersion != 1) { error = "unsupported ui state protocol"; return false; }
+            if (!string.Equals(state.ModuleId, expectedModuleId, StringComparison.Ordinal))
+            {
+                error = "ui state module id mismatch";
+                return false;
+            }
+            if (SuiteModuleCatalog.Find(state.ModuleId) == null) { error = "unknown ui state module id"; return false; }
+            if (state.SortOrder < -10000 || state.SortOrder > 10000) { error = "ui state sort order out of range"; return false; }
+            if (double.IsNaN(state.Activated) || double.IsInfinity(state.Activated) || state.Activated < 0d)
+            {
+                error = "invalid ui activation time";
+                return false;
             }
             return true;
         }

@@ -12,11 +12,11 @@ namespace ErenshorSuiteHub
     [LunarisPlugin(PluginGuid, PluginVersion, "forgetwhtuno",
         "One launcher and player-facing Hub for the optional Erenshor mod suite.")]
     [LunarisPermission(LunarisPermission.FileAccess | LunarisPermission.Harmony)]
-    public sealed class ErenshorSuiteHubPlugin : LunarisPlugin
+    public sealed class ErenshorSuiteHubPlugin : LunarisPlugin, ISuiteQuickCloseRuntime
     {
         internal const string PluginGuid = "forgetwhtuno.erenshor.suitehub";
         internal const string PluginName = "Erenshor Suite Hub";
-        internal const string PluginVersion = "0.4.0";
+        internal const string PluginVersion = "0.5.2";
 
         internal static ErenshorSuiteHubPlugin Instance;
 
@@ -32,14 +32,26 @@ namespace ErenshorSuiteHub
         private SuiteHubUi _ui;
         private bool _uiBuildAttempted;
         private bool _pendingToggle;
+        private bool _pendingOpenSuite;
+        private string _pendingDockModuleOpen = string.Empty;
         private bool _pendingClose;
         private bool _pendingReset;
         private GameplayReadinessStage _lastLoggedStage = GameplayReadinessStage.CharacterSelect;
+        private HashSet<string> _hiddenDockShortcuts = new HashSet<string>(StringComparer.Ordinal);
+        private HashSet<string> _consolidatedLauncherModules = new HashSet<string>(StringComparer.Ordinal);
 
         private readonly GameplayReadinessPolicy _readiness = new GameplayReadinessPolicy();
         private readonly SuiteModuleRegistry _registry = new SuiteModuleRegistry();
         private readonly Dictionary<string, AuraModuleBridge> _bridges =
             new Dictionary<string, AuraModuleBridge>(StringComparer.Ordinal);
+        // Structural capabilities are discovered on the normal bridge cadence and retained in the
+        // registry. Escape never scans assemblies/reflection providers; it only refreshes dynamic
+        // ui.state for this fixed catalog and consults the cached descriptor action list.
+        private readonly List<string> _quickCloseModuleIds = new List<string>();
+        private readonly HashSet<string> _quickCloseContractWarnings =
+            new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _quickCloseFaultWarnings =
+            new HashSet<string>(StringComparer.Ordinal);
         private List<ModPresence> _detectedMods = new List<ModPresence>();
         private string _pluginsDirectory = string.Empty;
         private float _nextDiscoveryPoll;
@@ -52,6 +64,8 @@ namespace ErenshorSuiteHub
             _settings = new HubSettings();
             Config.Register(ref _settings);
             InitializeConfigEntries();
+            _hiddenDockShortcuts = SuiteDockPolicy.ParseHiddenShortcuts(_settings.DockHiddenShortcuts);
+            _consolidatedLauncherModules = SuiteDockPolicy.ParseHiddenShortcuts(_settings.DockConsolidatedLauncherModules);
 
             SuiteHubDiagnostics.Reset();
             SuiteHubDiagnostics.Enabled = _settings.UiDiagnostics;
@@ -62,12 +76,14 @@ namespace ErenshorSuiteHub
             {
                 SuiteModuleDefinition def = SuiteModuleCatalog.All[i];
                 _bridges[def.Id] = new AuraModuleBridge(this, _registry, def.Id);
+                _quickCloseModuleIds.Add(def.Id);
             }
 
             CreateUi();
 
             _harmony = new Harmony(PluginGuid);
             _harmony.PatchAll();
+            SuiteNativeEscapeCompatibility.TryBind(_harmony);
 
             // Tiny, optional live-presence publisher so a mod's own launcher-suppression logic can
             // ask "is Hub actually alive" via Aura instead of scanning the scene for Hub components.
@@ -82,6 +98,10 @@ namespace ErenshorSuiteHub
 
             Logging.LogInfo("Erenshor Suite Hub " + PluginVersion +
                 " loaded. UI is gated by native character/world readiness and appears only after gameplay control is established.");
+            if (!SuiteNativeEscapeCompatibility.IsNativeConsumeBound)
+                Logging.LogInfo("Suite quick-close native consumption is disabled: " +
+                    SuiteNativeEscapeCompatibility.BindingStatus +
+                    ". Suite Escape polling is disabled; use explicit close controls until a native consume boundary is verified.");
         }
 
         private static string ResolvePluginsDirectory()
@@ -110,6 +130,10 @@ namespace ErenshorSuiteHub
             _ui.GetDeveloperEnabled = delegate { return _settings != null && _settings.DeveloperUi; };
             _ui.GetReadinessText = delegate { return ReadinessDiagnostic; };
             _ui.OnRequestToggle = delegate { _pendingToggle = true; };
+            _ui.OnRequestOpenSuite = delegate { _pendingOpenSuite = true; };
+            _ui.OnRequestDockModuleOpen = delegate(string moduleId) { _pendingDockModuleOpen = moduleId ?? string.Empty; };
+            _ui.GetDockModules = BuildDockModuleStates;
+            _ui.SetDockShortcutVisible = SetDockShortcutVisible;
             _ui.OnRequestClose = delegate { _pendingClose = true; };
             _ui.OnRequestResetPosition = delegate { _pendingReset = true; };
             _ui.PersistLauncherNormalized = PersistLauncherNormalized;
@@ -176,7 +200,36 @@ namespace ErenshorSuiteHub
                     _pendingToggle = false;
                     if (_readiness.IsReady) ToggleWindow();
                 }
+                if (_pendingOpenSuite)
+                {
+                    _pendingOpenSuite = false;
+                    if (_readiness.IsReady)
+                    {
+                        OpenWindow();
+                        if (_ui != null) _ui.CompleteDockLaunch(true);
+                    }
+                }
+                if (!string.IsNullOrEmpty(_pendingDockModuleOpen))
+                {
+                    string moduleId = _pendingDockModuleOpen;
+                    _pendingDockModuleOpen = string.Empty;
+                    string result = "Gameplay not ready";
+                    bool opened = _readiness.IsReady && TryOpenDockModulePanel(moduleId, out result);
+                    if (opened)
+                    {
+                        if (_ui != null) _ui.CompleteDockLaunch(true);
+                    }
+                    else if (_ui != null)
+                    {
+                        _ui.SetDockFeedback(string.IsNullOrEmpty(result) ? "Panel unavailable" : result);
+                    }
+                }
                 if (_pendingReset) { _pendingReset = false; ResetPositions(); }
+
+                // Escape is intentionally not polled here. Until an exact native Escape/menu
+                // boundary is proven, Suite UI uses explicit close controls and vanilla Escape is
+                // left completely untouched. When the verified Harmony prefix binds, it becomes the
+                // single Suite-owned quick-close authority.
 
                 if (_readiness.IsReady)
                 {
@@ -187,18 +240,27 @@ namespace ErenshorSuiteHub
                         if (DiscoveryChanged(_detectedMods, refreshed))
                         {
                             _detectedMods = refreshed;
-                            // A mod being installed/uninstalled changes the nav list itself.
-                            if (_ui != null && _ui.IsWindowOpen) _ui.QueueNavStructureRebuild();
+                            // A mod being installed/uninstalled changes both the full Suite nav
+                            // and the compact dock shortcut candidates.
+                            if (_ui != null)
+                            {
+                                if (_ui.IsWindowOpen) _ui.QueueNavStructureRebuild();
+                                _ui.QueueDockRebuildIfContentChanged();
+                            }
                         }
                     }
                     if (Time.unscaledTime >= _nextBridgePoll)
                     {
                         _nextBridgePoll = Time.unscaledTime + 1f;
                         PollModuleBridges();
-                        // Rebuild ONLY if the polled data actually changed. Rebuilding
-                        // unconditionally on this 1 Hz cadence tore the whole window down and
-                        // recreated it every second - the primary cause of the 0.3.0 flicker.
-                        if (_ui != null && _ui.IsWindowOpen) _ui.QueueRebuildIfContentChanged();
+                        ConsolidateStandaloneLaunchersOnce();
+                        // Rebuild ONLY if structural data actually changed. Dynamic status/ui.state
+                        // churn is excluded by both the Suite window and dock signatures.
+                        if (_ui != null)
+                        {
+                            if (_ui.IsWindowOpen) _ui.QueueRebuildIfContentChanged();
+                            _ui.QueueDockRebuildIfContentChanged();
+                        }
                     }
                 }
 
@@ -248,8 +310,8 @@ namespace ErenshorSuiteHub
 
         // ---- position persistence ------------------------------------------------------------
         // Stored NORMALIZED (0..1 of screen extent) so a saved layout survives resolution changes.
-        // Values written by the previous OnGUI Hub were absolute pixels; SuiteUiGeometry migrates
-        // those transparently on first read. Config is written once per completed drag (via
+        // Values written by the previous OnGUI Hub were incompatible top-left-origin pixels;
+        // SuiteUiGeometry rejects them and falls back to known-good defaults. Config is written once per completed drag (via
         // SuiteDragGuard.OnDragCompleted), never per drag frame.
 
         private Vector2 LoadLauncherNormalized()
@@ -280,8 +342,12 @@ namespace ErenshorSuiteHub
             float h = _windowHeight.Value;
             if (float.IsNaN(w) || float.IsInfinity(w) || w <= 0f) w = 620f;
             if (float.IsNaN(h) || float.IsInfinity(h) || h <= 0f) h = 430f;
-            w = Mathf.Clamp(w, 420f, Mathf.Max(420f, Screen.width - 20f));
-            h = Mathf.Clamp(h, 300f, Mathf.Max(300f, Screen.height - 20f));
+            float maxW = Mathf.Max(1f, Screen.width - SuiteUiGeometry.WindowScreenMargin);
+            float minW = Mathf.Min(420f, maxW);
+            float maxH = Mathf.Max(1f, Screen.height - SuiteUiGeometry.WindowScreenMargin);
+            float minH = Mathf.Min(SuiteUiGeometry.CompactWindowMinHeight, maxH);
+            w = Mathf.Clamp(w, minW, maxW);
+            h = Mathf.Clamp(h, minH, maxH);
             return new Vector2(w, h);
         }
 
@@ -304,7 +370,7 @@ namespace ErenshorSuiteHub
         private void SafeSaveConfig()
         {
             try { Config.Save(); }
-            catch (Exception ex) { Logging.LogWarning("Suite Hub could not save layout: " + ex.GetType().Name); }
+            catch (Exception ex) { Logging.LogWarning("Suite Hub could not save config: " + ex.GetType().Name); }
         }
 
         private void ResetPositions()
@@ -355,14 +421,22 @@ namespace ErenshorSuiteHub
 
         private string DescribeHubPresence()
         {
-            // interactionValidated is reserved for future consumption by sibling mods' own
-            // SuiteUiPolicy.IsHubAvailable() launcher-suppression checks. Today every sibling mod's
-            // policy only checks for Hub's mere presence (FindObjectsOfType<LunarisPlugin>() for
-            // this exact type), so this field currently has no observed effect anywhere -- see
-            // AGENTS.md "Launcher-suppression posture" for the interim mitigation.
+            // uiAvailable is the practical launcher-fallback capability: it reports whether the
+            // retained Hub UI actually exists right now. The older interactionValidated field is
+            // retained as diagnostic/manual validation metadata only; sibling launchers must not
+            // stay permanently forced on just because that optional validation bit is false.
+            // uiAvailable is also the sibling launcher-ownership claim. It is true only when the
+            // retained UI exists AND every installed catalogued dedicated-panel module can be safely
+            // opened through a live literal openPanel endpoint. A missing/malformed provider therefore
+            // makes siblings fail back to their own launchers instead of being stranded.
+            bool uiAvailable = _ui != null && _ui.IsBuilt && CanOwnInstalledLauncherAccess();
             return "protocol=1&module=suitehub&display=Suite%20Hub&version=" + Uri.EscapeDataString(PluginVersion) +
                 "&status=" + (_readiness.IsReady ? "Ready" : "NotReady") +
-                "&interactionValidated=" + (_settings != null && _settings.HubInteractionValidated ? "true" : "false");
+                "&uiAvailable=" + (uiAvailable ? "true" : "false") +
+                "&interactionValidated=" + (_settings != null && _settings.HubInteractionValidated ? "true" : "false") +
+                "&quickCloseContract=1" +
+                "&quickCloseCentral=1" +
+                "&quickClose=" + (SuiteNativeEscapeCompatibility.IsNativeConsumeBound ? "1" : "0");
         }
 
         internal string ReadinessDiagnostic
@@ -382,6 +456,101 @@ namespace ErenshorSuiteHub
             foreach (KeyValuePair<string, AuraModuleBridge> pair in _bridges) pair.Value.Poll();
         }
 
+        private List<SuiteDockModuleState> BuildDockModuleStates()
+        {
+            List<SuiteDockModuleState> states = new List<SuiteDockModuleState>();
+            for (int i = 0; i < _detectedMods.Count; i++)
+            {
+                ModPresence presence = _detectedMods[i];
+                AuraModuleBridge bridge;
+                _bridges.TryGetValue(presence.ModuleId, out bridge);
+                SuiteModuleDescriptor descriptor = _registry.Get(presence.ModuleId);
+                states.Add(new SuiteDockModuleState
+                {
+                    ModuleId = presence.ModuleId,
+                    DisplayName = descriptor != null && !string.IsNullOrEmpty(descriptor.DisplayName)
+                        ? descriptor.DisplayName : presence.DisplayName,
+                    // Runtime provider evidence is stronger than an exact DLL filename. This
+                    // keeps the dock truthful if a manager/profile changes the physical filename.
+                    Installed = presence.Installed || (bridge != null && bridge.HasRuntimeSignal),
+                    Descriptor = descriptor,
+                    ActionEndpointAvailable = bridge != null && bridge.CanInvokeAction(SuiteDockPolicy.OpenPanelActionId),
+                    Hidden = _hiddenDockShortcuts.Contains(presence.ModuleId)
+                });
+            }
+            return states;
+        }
+
+        private bool SetDockShortcutVisible(string moduleId, bool visible)
+        {
+            if (SuiteModuleCatalog.Find(moduleId) == null) return false;
+            if (visible) _hiddenDockShortcuts.Remove(moduleId); else _hiddenDockShortcuts.Add(moduleId);
+            _settings.DockHiddenShortcuts = SuiteDockPolicy.SerializeHiddenShortcuts(_hiddenDockShortcuts);
+            SafeSaveConfig();
+            return true;
+        }
+
+        // Fail-closed ownership claim used by sibling standalone launcher policies. File presence alone
+        // never grants ownership; for every installed module that is catalogued as having a dedicated
+        // launcher/panel, Hub must currently hold a valid descriptor AND live action endpoint for
+        // literal openPanel. Registration failure therefore keeps uiAvailable=false.
+        private bool CanOwnInstalledLauncherAccess()
+        {
+            return SuiteDockPolicy.CanOwnInstalledDedicatedPanels(BuildDockModuleStates());
+        }
+
+        // One-time migration through each module's OWN validated setting.set endpoint. This never edits
+        // sibling config files directly. It converts legacy "show my floating launcher even with Hub"
+        // defaults into the unified-dock default once safe openPanel access has been proven. The ledger
+        // prevents repeated enforcement: after migration, a player may explicitly turn a standalone
+        // launcher back on and Hub will respect that choice.
+        private void ConsolidateStandaloneLaunchersOnce()
+        {
+            List<SuiteDockModuleState> states = BuildDockModuleStates();
+            bool ledgerChanged = false;
+            for (int i = 0; i < states.Count; i++)
+            {
+                SuiteDockModuleState state = states[i];
+                if (state == null || !state.CanLaunch || _consolidatedLauncherModules.Contains(state.ModuleId)) continue;
+                AuraModuleBridge bridge;
+                if (!_bridges.TryGetValue(state.ModuleId, out bridge) || bridge == null) continue;
+                SuiteSettingDescriptor setting = bridge.FindCachedSetting("showLauncher");
+                if (setting == null || setting.Kind != SuiteSettingKind.Bool || !setting.Mutable) continue;
+
+                bool migrated = true;
+                if (SuiteSettingDisplayPolicy.IsOn(setting.Value))
+                {
+                    string result;
+                    migrated = bridge.TrySetSetting("showLauncher", "false", out result);
+                    if (migrated) bridge.Poll();
+                    else Logging.LogWarning("Suite dock could not consolidate " + state.ModuleId +
+                        " standalone launcher through its setting contract: " + result);
+                }
+
+                if (migrated)
+                {
+                    _consolidatedLauncherModules.Add(state.ModuleId);
+                    ledgerChanged = true;
+                }
+            }
+            if (!ledgerChanged) return;
+            _settings.DockConsolidatedLauncherModules =
+                SuiteDockPolicy.SerializeHiddenShortcuts(_consolidatedLauncherModules);
+            SafeSaveConfig();
+        }
+
+        private bool TryOpenDockModulePanel(string moduleId, out string result)
+        {
+            result = "Panel unavailable";
+            if (string.IsNullOrEmpty(moduleId) || SuiteModuleCatalog.Find(moduleId) == null) return false;
+            AuraModuleBridge bridge;
+            if (!_bridges.TryGetValue(moduleId, out bridge) || bridge == null ||
+                !bridge.CanInvokeAction(SuiteDockPolicy.OpenPanelActionId)) return false;
+            bool ok = bridge.TryInvokeAction(SuiteDockPolicy.OpenPanelActionId, string.Empty, out result);
+            if (ok) bridge.Poll();
+            return ok;
+        }
+
         internal static SuiteModuleDescriptor GetRegisteredModule(string moduleId)
         {
             return Instance == null ? null : Instance._registry.Get(moduleId);
@@ -398,14 +567,135 @@ namespace ErenshorSuiteHub
         {
             AuraModuleBridge bridge = GetModuleBridge(moduleId);
             if (bridge == null) { result = "Suite bridge unavailable"; return false; }
-            return bridge.TrySetSetting(settingId, value, out result);
+            bool ok = bridge.TrySetSetting(settingId, value, out result);
+            // A successful mutation must be visible immediately. Re-read describe + all setting
+            // tiers synchronously instead of leaving status/value text stale until the next 1 Hz
+            // bridge poll. The UI then reconciles dynamic values in place unless schema changed.
+            SuiteSettingMutationRefreshPlan plan = SuiteSettingMutationPolicy.Resolve(ok);
+            if (plan.PollAuthoritativeState) bridge.Poll();
+            return ok;
         }
 
         internal static bool TryInvokeModuleAction(string moduleId, string actionId, string argument, out string result)
         {
             AuraModuleBridge bridge = GetModuleBridge(moduleId);
             if (bridge == null) { result = "Suite bridge unavailable"; return false; }
-            return bridge.TryInvokeAction(actionId, argument, out result);
+            bool ok = bridge.TryInvokeAction(actionId, argument, out result);
+            if (ok) bridge.Poll();
+            return ok;
+        }
+
+        // Called only by SuiteNativeEscapeCompatibility after a verified native Escape/menu target
+        // has been bound. One native keypress dismisses exactly one topmost Suite visual surface.
+        // The prefix suppresses vanilla only when that surface was actually closed; the next Escape
+        // therefore peels the next Suite layer or reaches the native handler normally.
+        internal static bool TryQuickCloseFromBoundNativeEscape()
+        {
+            ErenshorSuiteHubPlugin instance = Instance;
+            if (instance == null || !SuiteNativeEscapeCompatibility.IsNativeConsumeBound) return false;
+            SuiteQuickCloseResult result = instance.TryCloseTopmostSuiteUi();
+            return result != null && result.ShouldConsumeNativeEscape;
+        }
+
+        private SuiteQuickCloseResult TryCloseTopmostSuiteUi()
+        {
+            return SuiteQuickClosePolicy.CloseTopmost(_quickCloseModuleIds, this);
+        }
+
+        // ISuiteQuickCloseRuntime ---------------------------------------------------------------
+        // These explicit implementations keep the coordinator's authority intentionally tiny.
+        SuiteUiStateDescriptor ISuiteQuickCloseRuntime.ReadHubUiState()
+        {
+            if (_ui == null || !_ui.IsWindowOpen) return null;
+            return new SuiteUiStateDescriptor
+            {
+                ProtocolVersion = 1,
+                ModuleId = SuiteQuickClosePolicy.HubModuleId,
+                Open = true,
+                Closeable = true,
+                SortOrder = _ui.SortingOrder,
+                Activated = _ui.WindowActivatedAt
+            };
+        }
+
+        SuiteUiStateDescriptor ISuiteQuickCloseRuntime.ReadUiState(string moduleId)
+        {
+            AuraModuleBridge bridge;
+            if (!_bridges.TryGetValue(moduleId, out bridge) || bridge == null) return null;
+            return bridge.RefreshUiStateForQuickClose();
+        }
+
+        bool ISuiteQuickCloseRuntime.HasClosePanelAction(string moduleId)
+        {
+            SuiteModuleDescriptor descriptor = _registry.Get(moduleId);
+            bool has = descriptor != null && descriptor.HasAction(SuiteQuickClosePolicy.ClosePanelActionId);
+            if (has) _quickCloseContractWarnings.Remove(moduleId);
+            return has;
+        }
+
+        bool ISuiteQuickCloseRuntime.TryClosePanel(string moduleId, out string result)
+        {
+            result = "module bridge unavailable";
+            AuraModuleBridge bridge;
+            if (!_bridges.TryGetValue(moduleId, out bridge) || bridge == null) return false;
+            bool invoked = bridge.TryInvokeAction(SuiteQuickClosePolicy.ClosePanelActionId, string.Empty, out result);
+            if (!invoked)
+            {
+                LogQuickCloseFaultOnce(moduleId, "closePanel", result);
+                return false;
+            }
+
+            // The native Prefix may suppress vanilla only for an actual visual close, not merely an
+            // accepted/queued close request. The module contract therefore requires closePanel to
+            // update ui.state synchronously. Failure remains fail-open to vanilla Escape.
+            try
+            {
+                SuiteUiStateDescriptor after = bridge.RefreshUiStateForQuickClose();
+                if (after == null || after.Open)
+                {
+                    result = after == null ? "closePanel returned ok but ui.state could not verify closure"
+                        : "closePanel returned ok but ui.state remains open";
+                    LogQuickCloseFaultOnce(moduleId, "closePanel.verify", result);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                result = "closePanel verification failed: " + ex.GetType().Name;
+                LogQuickCloseFaultOnce(moduleId, "closePanel.verify", result);
+                return false;
+            }
+
+            _quickCloseFaultWarnings.Remove(moduleId + "|closePanel");
+            _quickCloseFaultWarnings.Remove(moduleId + "|closePanel.verify");
+            return true;
+        }
+
+        bool ISuiteQuickCloseRuntime.TryCloseHub()
+        {
+            if (_ui == null || !_ui.IsWindowOpen) return false;
+            CloseWindow();
+            return _ui == null || !_ui.IsWindowOpen;
+        }
+
+        void ISuiteQuickCloseRuntime.ReportMissingClosePanel(string moduleId)
+        {
+            if (_quickCloseContractWarnings.Add(moduleId))
+                Logging.LogWarning("Suite quick-close: " + moduleId +
+                    " reports an open closeable panel but does not advertise closePanel; leaving that panel untouched.");
+        }
+
+        void ISuiteQuickCloseRuntime.ReportFault(string moduleId, string stage, Exception error)
+        {
+            LogQuickCloseFaultOnce(moduleId, stage, error == null ? "unknown failure" : error.GetType().Name);
+        }
+
+        private void LogQuickCloseFaultOnce(string moduleId, string stage, string detail)
+        {
+            string key = (moduleId ?? "?") + "|" + (stage ?? "?");
+            if (!_quickCloseFaultWarnings.Add(key)) return;
+            Logging.LogWarning("Suite quick-close: " + (moduleId ?? "?") + " " + (stage ?? "?") +
+                " failed (" + (detail ?? "unknown") + ").");
         }
 
         private void OnDestroy()
@@ -419,10 +709,14 @@ namespace ErenshorSuiteHub
 
             try { foreach (KeyValuePair<string, AuraModuleBridge> pair in _bridges) pair.Value.Disconnect(); } catch { }
             _bridges.Clear();
+            _quickCloseModuleIds.Clear();
+            _quickCloseContractWarnings.Clear();
+            _quickCloseFaultWarnings.Clear();
             try { if (_presenceProvider != null) _presenceProvider.UnregisterFunc(); } catch { }
             _presenceProvider = null;
             _registry.Clear();
             try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { }
+            SuiteNativeEscapeCompatibility.ResetBindingState();
             _readiness.Reset();
             if (Instance == this) Instance = null;
         }
@@ -445,9 +739,10 @@ namespace ErenshorSuiteHub
     // TypeTextCheckCommandsPatch on TypeText.CheckCommands) rather than inventing a new one.
     // Returning true (unhandled) preserves vanilla unknown-command handling for every other input.
     //
-    // This is the ONLY Harmony patch the Suite Hub UI still needs. The previous input/camera
-    // compatibility patches were deleted when the Hub moved to retained uGUI - see
-    // docs/SUITE_UI_ARCHITECTURE.md for what each one did and why it is now redundant.
+    // This is the ordinary Harmony patch the Suite Hub always installs. The previous global
+    // input/camera compatibility patches were deleted when the Hub moved to retained uGUI. A
+    // separate Escape prefix may be installed only by SuiteNativeEscapeCompatibility after an
+    // exact current Assembly-CSharp target is verified; its target is intentionally unbound here.
     [HarmonyPatch(typeof(TypeText), "CheckCommands")]
     internal static class SuiteHubChatCommandPatch
     {

@@ -5,12 +5,12 @@ internal static class SuiteUiGeometryTests
     internal static int RunAll()
     {
         int a = 0;
-        a += TestAssert.True(SuiteUiGeometry.LauncherRegionsDoNotOverlap(112f), "launcher grip and button do not overlap");
+        a += TestAssert.True(SuiteUiGeometry.LauncherRegionsDoNotOverlap(152f), "launcher grip and button do not overlap");
 
-        SuiteRect launcher = SuiteUiGeometry.ClampLauncher(new SuiteRect(-99f, 9999f, 1f, 1f), 1920f, 1080f, 112f);
+        SuiteRect launcher = SuiteUiGeometry.ClampLauncher(new SuiteRect(-99f, 9999f, 1f, 1f), 1920f, 1080f, 152f);
         a += TestAssert.Equal(0f, launcher.X, "launcher left recovery");
         a += TestAssert.Equal(1050f, launcher.Y, "launcher bottom recovery");
-        a += TestAssert.Equal(112f, launcher.Width, "launcher fixed width");
+        a += TestAssert.Equal(152f, launcher.Width, "launcher fixed width");
         a += TestAssert.Equal(30f, launcher.Height, "launcher fixed height");
 
         SuiteRect window = SuiteUiGeometry.ClampWindow(new SuiteRect(float.NaN, -100f, 99999f, float.NaN), 1280f, 720f);
@@ -19,7 +19,13 @@ internal static class SuiteUiGeometryTests
         a += TestAssert.Equal(1260f, window.Width, "oversize width clamped");
         a += TestAssert.Equal(430f, window.Height, "NaN height recovers to default");
 
+        SuiteRect tiny = SuiteUiGeometry.ClampWindow(
+            new SuiteRect(0f, 0f, 620f, 430f), 300f, 200f);
+        a += TestAssert.Equal(280f, tiny.Width, "window width respects tiny-screen margin");
+        a += TestAssert.Equal(180f, tiny.Height, "window height respects tiny-screen margin");
+
         a += RunNormalizedPositionTests();
+        a += RunCompactHeightTests();
         return a;
     }
 
@@ -55,6 +61,12 @@ internal static class SuiteUiGeometryTests
         a += TestAssert.Equal(0f, SuiteUiGeometry.ResolveAxis(float.NaN, 1920f, 100f), "resolve rejects NaN");
         a += TestAssert.Equal(0f, SuiteUiGeometry.ResolveAxis(0.5f, 1920f, 99999f), "oversized panel pinned to origin");
 
+        // A runtime position survives a resolution change by normalizing against the PREVIOUS
+        // extent, then resolving against the new one (SuiteHubUi preserves the old dimensions).
+        float carried = SuiteUiGeometry.NormalizeAxis(960f, 1920f);
+        a += TestAssert.Equal(640f, SuiteUiGeometry.ResolveAxis(carried, 1280f, 100f),
+            "resolution carry uses previous screen extent");
+
         // A saved layout survives a resolution change: same normalized value, new screen, still on screen.
         SuiteRect small = SuiteUiGeometry.ResolvePanel(0.98f, 0.98f, 620f, 430f, 1280f, 720f);
         a += TestAssert.Equal(660f, small.X, "resolution change keeps window on screen horizontally");
@@ -73,4 +85,28 @@ internal static class SuiteUiGeometryTests
 
         return a;
     }
+    private static int RunCompactHeightTests()
+    {
+        int a = 0;
+        a += TestAssert.Equal(230f, SuiteUiGeometry.ResolveCompactWindowHeight(120f, 430f, 1080f),
+            "small page uses compact minimum");
+        a += TestAssert.Equal(340f, SuiteUiGeometry.ResolveCompactWindowHeight(340f, 430f, 1080f),
+            "medium page uses preferred height");
+        a += TestAssert.Equal(430f, SuiteUiGeometry.ResolveCompactWindowHeight(900f, 430f, 1080f),
+            "large page caps at configured envelope");
+        a += TestAssert.Equal(280f, SuiteUiGeometry.ResolveCompactWindowHeight(900f, 430f, 300f),
+            "compact height caps to screen margin");
+
+        SuiteRect shrunk = SuiteUiGeometry.ResizeWindowKeepingTop(
+            new SuiteRect(100f, 100f, 620f, 430f), 230f, 1920f, 1080f);
+        a += TestAssert.Equal(300f, shrunk.Y, "content-fit shrink preserves top edge");
+        a += TestAssert.Equal(230f, shrunk.Height, "content-fit shrink applies target height");
+
+        SuiteRect grown = SuiteUiGeometry.ResizeWindowKeepingTop(
+            new SuiteRect(100f, 700f, 620f, 230f), 430f, 1920f, 1080f);
+        a += TestAssert.Equal(500f, grown.Y, "content-fit grow preserves top edge");
+        a += TestAssert.Equal(430f, grown.Height, "content-fit grow applies target height");
+        return a;
+    }
+
 }
