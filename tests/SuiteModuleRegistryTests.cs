@@ -34,7 +34,7 @@ internal static class SuiteModuleRegistryTests
 
         SuiteModuleDefinition followDef = SuiteModuleCatalog.Find("follow");
         a += TestAssert.True(followDef != null, "follow module catalogued");
-        a += TestAssert.False(followDef.HasDedicatedPanel, "follow has no dedicated general panel per canonical contract");
+        a += TestAssert.True(followDef.HasDedicatedPanel, "follow advertises its standalone guide/status fallback panel");
 
         SuiteModuleDefinition partyToolsDef = SuiteModuleCatalog.Find("partytools");
         a += TestAssert.True(partyToolsDef.HasDedicatedPanel, "party tools keeps its dedicated/transient panel");
