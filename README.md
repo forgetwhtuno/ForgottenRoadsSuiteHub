@@ -1,6 +1,6 @@
 # Forgotten Roads Hub for Erenshor
 
-**Version:** 0.5.2 RC camera-containment candidate
+**Version:** 0.5.3 RC discoverability/camera-containment candidate
 **Author:** forgetwhtuno
 **Loader:** native Lunaris
 **License:** Apache-2.0
@@ -101,6 +101,12 @@ consolidation only after safe `openPanel` access is proven, using that module's 
 files directly. A small Hub-side migration ledger prevents repeated enforcement, so a player who
 later explicitly re-enables a standalone launcher keeps that choice. Standalone fallback logic still
 forces launchers visible whenever Hub or that module's bridge is unavailable.
+
+Disk discovery mirrors current Lunaris by searching `<Erenshor>\plugins` recursively while excluding
+`config` subtrees. Normal Suite navigation also merges live Aura provider evidence, so a module that
+Lunaris has actually loaded remains visible even if a manager nested or renamed its physical DLL. Runtime
+presence alone does not grant controls: `openPanel` still requires the validated module descriptor and
+live action endpoint.
 
 Lunaris Aura transports strict bounded string/primitive contracts. For module `<id>` the Hub can
 consume:

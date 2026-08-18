@@ -1,6 +1,6 @@
 # Vanilla Erenshor `DragUI` — Findings (evidence-based, from installed assembly)
 
-Source: `D:\SteamLibrary\steamapps\common\Erenshor\Erenshor_Data\Managed\Assembly-CSharp.dll`
+Source: `<Erenshor>\Erenshor_Data\Managed\Assembly-CSharp.dll`
 (SHA256 `B840CB8076ED0553F7DC3BEB4042ABA653917882F763181EC0D2C13C26C17847`, per
 `INTEGRATION_BRIEFING.md`). Extracted via `ildasm.exe` full-assembly IL dump
 (`scratchpad/il/full.il`, class body at lines 331173-331948) and PowerShell reflection.

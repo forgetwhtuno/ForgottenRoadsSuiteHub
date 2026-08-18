@@ -7,7 +7,7 @@ internal static class SuiteDockPolicyTests
     {
         int a = 0;
         SuiteModuleDescriptor journal = Descriptor("journal", "Journal", "openPanel", "closePanel");
-        SuiteModuleDescriptor duel = Descriptor("duel", "Practice Duel", "challenge", "stop");
+        SuiteModuleDescriptor duel = Descriptor("duel", "Practice Duel", "openPanel", "closePanel", "challenge", "stop");
 
         a += TestAssert.True(SuiteDockPolicy.IsAllowedDockAction("openPanel"), "dock allows literal openPanel");
         a += TestAssert.False(SuiteDockPolicy.IsAllowedDockAction("closePanel"), "dock rejects closePanel");
@@ -15,7 +15,7 @@ internal static class SuiteDockPolicyTests
         a += TestAssert.True(SuiteDockPolicy.CanLaunchPanel(true, journal, true), "installed registered openPanel is launchable");
         a += TestAssert.False(SuiteDockPolicy.CanLaunchPanel(false, journal, true), "unavailable module is not launchable");
         a += TestAssert.False(SuiteDockPolicy.CanLaunchPanel(true, null, true), "missing provider is not launchable");
-        a += TestAssert.False(SuiteDockPolicy.CanLaunchPanel(true, duel, true), "module missing openPanel is not launchable");
+        a += TestAssert.True(SuiteDockPolicy.CanLaunchPanel(true, duel, true), "contextual guide panel is launchable");
         a += TestAssert.False(SuiteDockPolicy.CanLaunchPanel(true, journal, false), "missing action endpoint is not launchable");
 
         a += TestAssert.True(SuiteDockPolicy.DockCanvasSortingOrder > 540,
@@ -27,7 +27,7 @@ internal static class SuiteDockPolicyTests
             State("duel", "Practice Duel", duel, false, true)
         };
         a += TestAssert.True(SuiteDockPolicy.CanOwnInstalledDedicatedPanels(ownershipStates),
-            "contextual module without a dedicated panel does not block Hub launcher ownership");
+            "all dedicated fallback panels permit truthful Hub launcher ownership");
         ownershipStates[0].Descriptor = null;
         a += TestAssert.False(SuiteDockPolicy.CanOwnInstalledDedicatedPanels(ownershipStates),
             "provider fault/missing registration prevents Hub launcher ownership");

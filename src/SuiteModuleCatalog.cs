@@ -27,13 +27,13 @@
         // grants a callable control API.
         internal static readonly SuiteModuleDefinition[] All = new SuiteModuleDefinition[]
         {
-            new SuiteModuleDefinition("deepsims", "Deep Sims", "ErenshorDeepSims.dll", "Grounded Sim social dialogue and memory.", false, "/dsims, /aistatus"),
+            new SuiteModuleDefinition("deepsims", "Deep Sims", "ErenshorDeepSims.dll", "Grounded Sim social dialogue and memory.", true, "Standalone Deep Sims quick panel"),
             new SuiteModuleDefinition("partytools", "Party Tools", "ErenshorPartyTools.dll", "Ready checks and party rolls.", true, "/tools, /ready, /roll"),
-            new SuiteModuleDefinition("follow", "Follow", "ErenshorFollow.dll", "Follow, lead, and expedition assistance.", false, "/efollow, /elead, /expedition"),
-            new SuiteModuleDefinition("campmaster", "Campmaster", "ErenshorCampmaster.dll", "Camp and relaxation context tools.", false, "/camp, /relax"),
-            new SuiteModuleDefinition("duel", "Practice Duel", "ErenshorDuel.dll", "Friendly non-lethal practice duels.", false, "/eduel"),
+            new SuiteModuleDefinition("follow", "Follow", "ErenshorFollow.dll", "Follow, lead, and expedition assistance.", true, "Standalone guide/status plus contextual Sim Actions"),
+            new SuiteModuleDefinition("campmaster", "Campmaster", "ErenshorCampmaster.dll", "Camp and relaxation context tools.", true, "Standalone Campmaster quick panel"),
+            new SuiteModuleDefinition("duel", "Practice Duel", "ErenshorDuel.dll", "Friendly non-lethal practice duels.", true, "Standalone guide/status plus contextual Sim Actions"),
             new SuiteModuleDefinition("pvp", "PvP", "ErenshorPvP.dll", "Arranged and ambient PvP encounters.", true, "/epvp"),
-            new SuiteModuleDefinition("nemesis", "Nemesis", "ErenshorNemesis.dll", "Persistent rivalry encounters.", false, "/enemesis"),
+            new SuiteModuleDefinition("nemesis", "Nemesis", "ErenshorNemesis.dll", "Persistent rivalry encounters.", true, "Standalone Nemesis quick panel"),
             new SuiteModuleDefinition("crafting", "Crafting", "ErenshorCraftingExpanded.dll", "Expanded crafting and foraging systems.", true, "/craftdiag"),
             new SuiteModuleDefinition("contracts", "Contracts", "ErenshorContracts.dll", "Contract board and objective tracking.", true, "Dedicated contract board"),
             new SuiteModuleDefinition("guildlife", "Guild Life", "ErenshorGuildLife.dll", "Guild roster and bulletin-life features.", true, "Dedicated Guild Life panel"),

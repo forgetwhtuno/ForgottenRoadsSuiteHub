@@ -3,7 +3,7 @@
 Status: **Checkpoint report. No code changed. Nothing built, nothing installed, nothing merged.**
 
 Evidence base: IL scan of the live `Assembly-CSharp.dll` at
-`D:\SteamLibrary\steamapps\common\Erenshor\Erenshor_Data\Managed`, plus a byte scan of the
+`<Erenshor>\Erenshor_Data\Managed`, plus a byte scan of the
 **installed** `ErenshorSuiteHub.dll` and a full read of the working-tree source.
 
 ---

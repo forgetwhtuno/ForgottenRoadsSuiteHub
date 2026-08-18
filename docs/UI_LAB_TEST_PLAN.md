@@ -92,7 +92,7 @@ Record PASS/FAIL per cell. A blank means untested, not passed.
 
 ## What to send back
 
-`D:\SteamLibrary\steamapps\common\Erenshor\lunaris.log`.
+`<Erenshor>\lunaris.log`.
 
 - `[HubGesture]` lines cover the **baseline only** — MouseDown/MouseUp with GUI coords, cursor lock
   state at press time, drag begin/end rects, toggle requests, window open flips.

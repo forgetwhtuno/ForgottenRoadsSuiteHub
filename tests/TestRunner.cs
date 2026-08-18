@@ -10,6 +10,7 @@ internal static class TestRunner
             assertions += GameplayReadinessPolicyTests.RunAll();
             assertions += ModDiscoveryTests.RunAll();
             assertions += SuiteModuleRegistryTests.RunAll();
+            assertions += ErenshorSuiteHub.DiscoverabilityAuditTests.RunAll();
             assertions += SuiteDockPolicyTests.RunAll();
             assertions += SuiteDockInteractionStateTests.RunAll();
             assertions += SuitePointerOwnershipStateTests.RunAll();

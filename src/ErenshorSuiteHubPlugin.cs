@@ -16,7 +16,7 @@ namespace ErenshorSuiteHub
     {
         internal const string PluginGuid = "forgetwhtuno.erenshor.suitehub";
         internal const string PluginName = "Forgotten Roads Hub";
-        internal const string PluginVersion = "0.5.2";
+        internal const string PluginVersion = "0.5.3";
 
         internal static ErenshorSuiteHubPlugin Instance;
 
@@ -125,7 +125,7 @@ namespace ErenshorSuiteHub
         private void CreateUi()
         {
             _ui = new SuiteHubUi();
-            _ui.GetMods = delegate { return _detectedMods; };
+            _ui.GetMods = GetEffectiveModPresence;
             _ui.GetHubVersion = delegate { return PluginVersion; };
             _ui.GetDeveloperEnabled = delegate { return _settings != null && _settings.DeveloperUi; };
             _ui.GetReadinessText = delegate { return ReadinessDiagnostic; };
@@ -454,6 +454,16 @@ namespace ErenshorSuiteHub
         private void PollModuleBridges()
         {
             foreach (KeyValuePair<string, AuraModuleBridge> pair in _bridges) pair.Value.Poll();
+        }
+
+        private List<ModPresence> GetEffectiveModPresence()
+        {
+            HashSet<string> runtimeModules = new HashSet<string>(StringComparer.Ordinal);
+            foreach (KeyValuePair<string, AuraModuleBridge> pair in _bridges)
+            {
+                if (pair.Value != null && pair.Value.HasRuntimeSignal) runtimeModules.Add(pair.Key);
+            }
+            return ModDiscovery.MergeRuntimeSignals(_detectedMods, runtimeModules);
         }
 
         private List<SuiteDockModuleState> BuildDockModuleStates()

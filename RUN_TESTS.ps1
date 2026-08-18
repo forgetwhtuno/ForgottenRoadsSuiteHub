@@ -36,6 +36,7 @@ $sources = @(
     "tests\GameplayReadinessPolicyTests.cs",
     "tests\ModDiscoveryTests.cs",
     "tests\SuiteModuleRegistryTests.cs",
+    "tests\DiscoverabilityAuditTests.cs",
     "tests\SuiteDockPolicyTests.cs",
     "tests\SuiteDockInteractionStateTests.cs",
     "tests\SuitePointerOwnershipStateTests.cs",
@@ -84,7 +85,7 @@ if ($cameraSource -notmatch '\[HarmonyPatch\(typeof\(CameraController\),\s*"Usin
 foreach ($token in @('UIWindows','activeSelf','ModernControls','releaseMouse','GetAxis','DraggingUIElement')) {
     if ($cameraSource -notmatch [regex]::Escape($token)) { throw "Suite Hub camera guard failed: native proof token missing: $token" }
 }
-if ($pluginSource -notmatch 'PluginVersion\s*=\s*"0\.5\.2"') { throw "Suite Hub RC version guard failed." }
+if ($pluginSource -notmatch 'PluginVersion\s*=\s*"0\.5\.3"') { throw "Suite Hub RC version guard failed." }
 $settingsSource = Get-Content (Join-Path $ScriptRoot "src\HubSettings.cs") -Raw
 if ($settingsSource -notmatch 'public\s+bool\s+UiDiagnostics\s*=\s*false') { throw "Suite Hub RC logging guard failed: UI diagnostics must be opt-in." }
 Write-Host "Suite Hub RC camera/gesture source guards: PASS" -ForegroundColor Green
