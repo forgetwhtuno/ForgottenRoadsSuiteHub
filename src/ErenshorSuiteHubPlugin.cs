@@ -16,7 +16,7 @@ namespace ErenshorSuiteHub
     {
         internal const string PluginGuid = "forgetwhtuno.erenshor.suitehub";
         internal const string PluginName = "Forgotten Roads Hub";
-        internal const string PluginVersion = "0.5.3";
+        internal const string PluginVersion = "0.5.5";
 
         internal static ErenshorSuiteHubPlugin Instance;
 
@@ -41,6 +41,7 @@ namespace ErenshorSuiteHub
         private HashSet<string> _consolidatedLauncherModules = new HashSet<string>(StringComparer.Ordinal);
 
         private readonly GameplayReadinessPolicy _readiness = new GameplayReadinessPolicy();
+        private readonly ForgottenRoadsDiscoveryHintPolicy _discoveryHint = new ForgottenRoadsDiscoveryHintPolicy();
         private readonly SuiteModuleRegistry _registry = new SuiteModuleRegistry();
         private readonly Dictionary<string, AuraModuleBridge> _bridges =
             new Dictionary<string, AuraModuleBridge>(StringComparer.Ordinal);
@@ -174,6 +175,15 @@ namespace ErenshorSuiteHub
                     GameplayReadinessStage previous = _lastLoggedStage;
                     _lastLoggedStage = _readiness.Stage;
                     SuiteHubDiagnostics.Log("readiness " + previous + " -> " + _readiness.Stage);
+                }
+
+                // Evaluated every frame regardless of the enable/disable setting so the session
+                // timer/latch stay consistent even if a player flips the setting mid-session; only
+                // whether the resulting hint is actually SENT is gated on _settings.
+                if (_discoveryHint.ShouldEmit(_readiness.Stage, Time.unscaledTime) &&
+                    _settings != null && _settings.DiscoveryHintEnabled)
+                {
+                    EmitForgottenRoadsDiscoveryHint();
                 }
 
                 EnsureUiBuilt();
@@ -466,6 +476,73 @@ namespace ErenshorSuiteHub
             return ModDiscovery.MergeRuntimeSignals(_detectedMods, runtimeModules);
         }
 
+        // Fires at most once per gameplay session (see ForgottenRoadsDiscoveryHintPolicy). Content
+        // is entirely public mod names/commands from ForgottenRoadsDiscoveryCatalog - no path,
+        // save-slot, account, or character data is ever eligible to appear here.
+        private void EmitForgottenRoadsDiscoveryHint()
+        {
+            try
+            {
+                List<string> lines = ForgottenRoadsDiscoveryMessage.Compose(GetEffectiveModPresence());
+                LogDiscoveryHintLines(lines);
+                if (lines.Count > 0)
+                    Logging.LogInfo("Forgotten Roads discovery hint sent (" + lines.Count + " line(s)); " +
+                        ForgottenRoadsChatStyle.Diagnostic);
+            }
+            catch (Exception ex) { Logging.LogWarning("Forgotten Roads discovery hint failed: " + ex.GetType().Name); }
+        }
+
+        // The ONE presentation authority for Forgotten Roads social-log output - the automatic
+        // discovery hint and /frhelp both come through here, so there is exactly one place where a
+        // ChatLogLine is constructed.
+        //
+        // Payload: sanitized, always markup-free.
+        // Style:   metadata only, and only ever a hex ColorString this runtime was actually
+        //          observed producing on native SystemMessages traffic (see
+        //          ForgottenRoadsChatStyle / SuiteHubNativeChatStylePatch). No named token is ever
+        //          hardcoded here: a name the current build's TMP does not know renders as visible
+        //          literal markup, which is what broke the previous release.
+        // Fallback: empty style -> native renderer emits no tag -> plain readable default line.
+        private static void LogDiscoveryHintLines(List<string> lines)
+        {
+            if (lines == null) return;
+            string style = ForgottenRoadsChatStyle.CapturedStyle;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string payload = ForgottenRoadsChatStyle.SanitizePayload(lines[i]);
+                if (string.IsNullOrEmpty(payload)) continue;
+                UpdateSocialLog.LogAdd(new ChatLogLine(
+                    payload, ChatLogLine.LogType.SystemMessages, style));
+            }
+        }
+
+        // On-demand equivalent of the automatic hint. Does not consume/require the one-time latch:
+        // a player may run this as many times as they like. Registered as a normal chat command
+        // through the SAME proven TypeText.CheckCommands interception already used by /mods -
+        // see SuiteHubChatCommandPatch below.
+        internal void HandleForgottenRoadsHelpCommand()
+        {
+            if (!_readiness.IsReady)
+            {
+                Logging.LogInfo("[SuiteHub] /frhelp ignored: gameplay not ready yet (stage=" + _readiness.Stage + ")");
+                return;
+            }
+            try
+            {
+                List<string> lines = ForgottenRoadsDiscoveryMessage.Compose(GetEffectiveModPresence());
+                if (lines.Count == 0)
+                {
+                    LogDiscoveryHintLines(new List<string>
+                    {
+                        "[Forgotten Roads] No installed module currently has a verified command hint."
+                    });
+                    return;
+                }
+                LogDiscoveryHintLines(lines);
+            }
+            catch (Exception ex) { Logging.LogWarning("/frhelp failed: " + ex.GetType().Name); }
+        }
+
         private List<SuiteDockModuleState> BuildDockModuleStates()
         {
             List<SuiteDockModuleState> states = new List<SuiteDockModuleState>();
@@ -728,6 +805,7 @@ namespace ErenshorSuiteHub
             try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { }
             SuiteNativeEscapeCompatibility.ResetBindingState();
             _readiness.Reset();
+            _discoveryHint.Reset();
             if (Instance == this) Instance = null;
         }
 
@@ -766,17 +844,53 @@ namespace ErenshorSuiteHub
                 string rawText = __instance.typed.text;
                 if (string.IsNullOrEmpty(rawText)) return true;
                 string trimmed = rawText.Trim();
-                if (!string.Equals(trimmed, "/mods", StringComparison.OrdinalIgnoreCase) &&
+                bool isFrHelp = string.Equals(trimmed, "/frhelp", StringComparison.OrdinalIgnoreCase);
+                if (!isFrHelp &&
+                    !string.Equals(trimmed, "/mods", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(trimmed, "/suitehub", StringComparison.OrdinalIgnoreCase))
                     return true;
 
                 try { __instance.typed.text = string.Empty; } catch { }
-                ErenshorSuiteHubPlugin.Instance.HandleModsChatCommand();
+                if (isFrHelp) ErenshorSuiteHubPlugin.Instance.HandleForgottenRoadsHelpCommand();
+                else ErenshorSuiteHubPlugin.Instance.HandleModsChatCommand();
                 return false;
             }
             catch (Exception)
             {
                 return true;
+            }
+        }
+    }
+
+    // NATIVE STYLE OBSERVER.
+    //
+    // Same shape as the proven Nemesis-side observation pattern: a passive, non-consuming Harmony
+    // postfix on the real native entry point (UpdateSocialLog.LogAdd(ChatLogLine)) that reads the
+    // typed line and returns without altering it. This is how Hub learns what the CURRENT Erenshor
+    // build actually supplies as a SystemMessages ColorString instead of guessing a token.
+    //
+    // Nothing here writes chat, changes routing, or touches Hub UI/readiness state.
+    [HarmonyPatch(typeof(UpdateSocialLog), "LogAdd", new Type[] { typeof(ChatLogLine) })]
+    internal static class SuiteHubNativeChatStylePatch
+    {
+        // Positional __0 + postfix is the exact already-proven Nemesis observation shape
+        // (NemesisNativeTypedChatStylePatch), not a new mechanism.
+        [HarmonyPostfix]
+        private static void Postfix(ChatLogLine __0)
+        {
+            try
+            {
+                if (__0 == null) return;
+                bool isSystemMessages =
+                    (__0.MyLogType & ChatLogLine.LogType.SystemMessages) == ChatLogLine.LogType.SystemMessages;
+                if (!ForgottenRoadsChatStyle.ObserveNativeLine(
+                        isSystemMessages, __0.ColorString, __0.MyChatString)) return;
+                ErenshorSuiteHubPlugin plugin = ErenshorSuiteHubPlugin.Instance;
+                if (plugin != null) plugin.LogUi("[SuiteHub] " + ForgottenRoadsChatStyle.Diagnostic);
+            }
+            catch (Exception)
+            {
+                // Observation is best-effort; a failure here must never disturb native chat.
             }
         }
     }

@@ -32,6 +32,10 @@ $sources = @(
     "src\SuiteSettingDisplayPolicy.cs",
     "src\SuiteSettingMutationPolicy.cs",
     "src\SuiteQuickClosePolicy.cs",
+    "src\ForgottenRoadsDiscoveryCatalog.cs",
+    "src\ForgottenRoadsDiscoveryMessage.cs",
+    "src\ForgottenRoadsDiscoveryHintPolicy.cs",
+    "src\ForgottenRoadsChatStyle.cs",
     "tests\TestAssert.cs",
     "tests\GameplayReadinessPolicyTests.cs",
     "tests\ModDiscoveryTests.cs",
@@ -51,6 +55,9 @@ $sources = @(
     "tests\SuiteHubViewTests.cs",
     "tests\SuiteHubRefreshPolicyTests.cs",
     "tests\SuiteQuickClosePolicyTests.cs",
+    "tests\ForgottenRoadsDiscoveryHintPolicyTests.cs",
+    "tests\ForgottenRoadsDiscoveryMessageTests.cs",
+    "tests\ForgottenRoadsChatStyleTests.cs",
     "tests\TestRunner.cs"
 ) | ForEach-Object { Join-Path $ScriptRoot $_ }
 
@@ -85,7 +92,7 @@ if ($cameraSource -notmatch '\[HarmonyPatch\(typeof\(CameraController\),\s*"Usin
 foreach ($token in @('UIWindows','activeSelf','ModernControls','releaseMouse','GetAxis','DraggingUIElement')) {
     if ($cameraSource -notmatch [regex]::Escape($token)) { throw "Suite Hub camera guard failed: native proof token missing: $token" }
 }
-if ($pluginSource -notmatch 'PluginVersion\s*=\s*"0\.5\.3"') { throw "Suite Hub RC version guard failed." }
+if ($pluginSource -notmatch 'PluginVersion\s*=\s*"0\.5\.5"') { throw "Suite Hub release version guard failed." }
 $settingsSource = Get-Content (Join-Path $ScriptRoot "src\HubSettings.cs") -Raw
 if ($settingsSource -notmatch 'public\s+bool\s+UiDiagnostics\s*=\s*false') { throw "Suite Hub RC logging guard failed: UI diagnostics must be opt-in." }
 Write-Host "Suite Hub RC camera/gesture source guards: PASS" -ForegroundColor Green
@@ -98,3 +105,60 @@ if ($hubUiSource -notmatch 'AddDockChevron\(button\.transform,\s*false\)' -or
     throw "Suite Hub release polish guard failed: glyph-safe dock chevron state is missing."
 }
 Write-Host "Suite Hub release polish chevron guard: PASS" -ForegroundColor Green
+
+# 11: /frhelp, if implemented, must be a thin dispatch onto the SAME verified composer/discovery
+# path as the automatic hint - never a second, independently-maintained text blob - and must reuse
+# the already-proven TypeText.CheckCommands interception rather than a new hook.
+if ($pluginSource -notmatch '"/frhelp"') { throw "Forgotten Roads discovery guard failed: /frhelp command not registered." }
+if ($pluginSource -notmatch 'HandleForgottenRoadsHelpCommand') { throw "Forgotten Roads discovery guard failed: /frhelp has no dedicated handler." }
+if ($pluginSource -notmatch 'HandleForgottenRoadsHelpCommand[\s\S]{0,400}ForgottenRoadsDiscoveryMessage\.Compose') {
+    throw "Forgotten Roads discovery guard failed: /frhelp does not reuse the verified discovery composer."
+}
+if (([regex]::Matches($pluginSource, '\[HarmonyPatch\(typeof\(TypeText\),\s*"CheckCommands"\)\]')).Count -ne 1) {
+    throw "Forgotten Roads discovery guard failed: /frhelp must reuse the single existing chat-command patch, not add a new one."
+}
+
+# The one-time automatic hint must be gated on Hub's own authoritative readiness stage/timing
+# policy and must not poll a raw fixed-timestamp/Sleep-style wait.
+if ($pluginSource -notmatch '_discoveryHint\.ShouldEmit\(_readiness\.Stage,\s*Time\.unscaledTime\)') {
+    throw "Forgotten Roads discovery guard failed: automatic hint is not driven by the readiness stage + unscaledTime."
+}
+if ($pluginSource -match 'Thread\.Sleep') { throw "Forgotten Roads discovery guard failed: blocking Sleep reintroduced." }
+
+$discoveryMessageSource = Get-Content (Join-Path $ScriptRoot "src\ForgottenRoadsDiscoveryMessage.cs") -Raw
+if ($discoveryMessageSource -notmatch 'firstCount') {
+    throw "Forgotten Roads discovery guard failed: two-line split logic missing."
+}
+Write-Host "Forgotten Roads discovery hint source guards: PASS" -ForegroundColor Green
+
+# Native chat color is metadata on ChatLogLine, and the ONLY safe metadata is a hex ColorString
+# actually observed on this runtime's native SystemMessages traffic. A named token (the previous
+# release shipped one) renders as visible literal markup on the current build's TMP.
+if ($pluginSource -match '<color|</color>') { throw "Forgotten Roads discovery guard failed: rich-text markup is embedded in Hub source." }
+if ($pluginSource -notmatch 'LogDiscoveryHintLines') { throw "Forgotten Roads discovery guard failed: shared native chat helper missing." }
+if (([regex]::Matches($pluginSource, 'new ChatLogLine\(')).Count -ne 1) {
+    throw "Forgotten Roads presentation guard failed: there must be exactly one typed ChatLogLine construction site."
+}
+if ($pluginSource -notmatch 'new ChatLogLine\([\s\S]{0,180}ChatLogLine\.LogType\.SystemMessages[\s\S]{0,60}style') {
+    throw "Forgotten Roads presentation guard failed: the emitted line does not carry the observed native style."
+}
+if ($pluginSource -notmatch 'ForgottenRoadsChatStyle\.CapturedStyle') {
+    throw "Forgotten Roads presentation guard failed: emitted style is not sourced from observed native traffic."
+}
+if ($pluginSource -notmatch 'ForgottenRoadsChatStyle\.SanitizePayload') {
+    throw "Forgotten Roads presentation guard failed: visible payload is not sanitized at the emit site."
+}
+if ($pluginSource -notmatch '\[HarmonyPatch\(typeof\(UpdateSocialLog\),\s*"LogAdd"') {
+    throw "Forgotten Roads presentation guard failed: native SystemMessages traffic is not observed."
+}
+if ($pluginSource -match 'UpdateSocialLog\.LogAdd\(lines\[i\],') {
+    throw "Forgotten Roads discovery guard failed: legacy string/color invocation remains in discovery output."
+}
+$chatStyleSource = Get-Content (Join-Path $ScriptRoot "src\ForgottenRoadsChatStyle.cs") -Raw
+if ($chatStyleSource -notmatch 'IsSafeColorString') { throw "Forgotten Roads presentation guard failed: style validation missing." }
+if ($chatStyleSource -notmatch 'PlainStyle = ""') { throw "Forgotten Roads presentation guard failed: plain fallback style is not the empty ColorString." }
+foreach ($token in @('"cyan"', '"lightblue"', '"white"', '"yellow"', '"grey"', '"red"', '"green"')) {
+    if ($pluginSource.Contains($token)) { throw "Forgotten Roads presentation guard failed: named color token hardcoded in plugin source: $token" }
+    if ($chatStyleSource.Contains($token)) { throw "Forgotten Roads presentation guard failed: named color token hardcoded in style source: $token" }
+}
+Write-Host "Forgotten Roads native discovery color/source guards: PASS" -ForegroundColor Green
