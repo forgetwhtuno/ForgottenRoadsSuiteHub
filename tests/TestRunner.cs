@@ -25,6 +25,9 @@ internal static class TestRunner
             assertions += SuiteHubViewTests.RunAll();
             assertions += SuiteHubRefreshPolicyTests.RunAll();
             assertions += SuiteQuickClosePolicyTests.RunAll();
+            assertions += ForgottenRoadsDiscoveryHintPolicyTests.RunAll();
+            assertions += ForgottenRoadsDiscoveryMessageTests.RunAll();
+            assertions += ForgottenRoadsChatStyleTests.RunAll();
             Console.WriteLine("PASS Erenshor Suite Hub deterministic suite - " + assertions.ToString() + " assertions");
             return 0;
         }

@@ -65,5 +65,8 @@ namespace ErenshorSuiteHub
 
         [Config("HubInteractionValidated", "Developer", "Manual live-validation marker for Suite Hub click/drag/camera containment. Informational only; launcher fallback uses the live Ready + uiAvailable presence capability instead of this flag.")]
         public bool HubInteractionValidated = false;
+
+        [Config("Enabled", "Discovery", "Show one Forgotten Roads discovery chat hint listing installed modules and their commands a few seconds after gameplay becomes ready, once per gameplay session. Also enables /frhelp to show it again on demand.")]
+        public bool DiscoveryHintEnabled = true;
     }
 }

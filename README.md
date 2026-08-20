@@ -1,6 +1,6 @@
 # Forgotten Roads Hub for Erenshor
 
-**Version:** 0.5.3 RC discoverability/camera-containment candidate
+**Version:** 0.5.5 discovery-chat presentation repair
 **Author:** forgetwhtuno
 **Loader:** native Lunaris
 **License:** Apache-2.0
@@ -16,6 +16,29 @@ launcher menu; it does **not** open the full Forgotten Roads window. `Mod Suite`
 opens the existing full Hub. Safe module rows are discovered from live Suite descriptors and appear
 only when the module advertises literal `openPanel` and its Aura action endpoint is currently live.
 `/mods` and `/suitehub` remain developer/recovery commands only; there is no global access hotkey.
+
+## Forgotten Roads discovery hint
+
+Once per gameplay session, a few seconds after a character genuinely reaches stable gameplay (not
+at character select, not while zoning), Hub prints one concise chat line - two at most if many
+Forgotten Roads modules are installed - listing every **currently installed** Forgotten Roads module
+and its primary command(s) or launcher, for example:
+
+```text
+[Forgotten Roads] Installed: Party Tools (/tools, /ready, /roll, /rollparty, /ptwho) •
+Follow (/efollow, /expedition) • Practice Duel (/eduel) • Journal (JOURNAL)
+```
+
+Only modules Hub can positively prove are installed (disk discovery merged with live Aura
+registration) appear, and only with a command hint verified against that module's own current chat
+parser - never a guessed or remembered command. The hint fires once per session: a later zone
+transition never repeats it, but returning to character select and loading a different character
+starts a new session that may show it again. Run `/frhelp` at any time to print the same information
+on demand. Both are controlled by a single `Discovery.Enabled` config toggle (on by default).
+
+Content is limited to public mod names, commands, and the generic word "panel"/"JOURNAL" for
+modules with no chat command; it never includes a path, save-slot id, account id, character key, or
+any other private data.
 
 Dock shortcut visibility is a Suite-owned preference and is separate from each sibling mod's
 standalone-launcher preference. Newly available safe panel shortcuts appear by default; `Customize...`
