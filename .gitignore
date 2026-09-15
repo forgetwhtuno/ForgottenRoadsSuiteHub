@@ -12,3 +12,15 @@ refs/
 .vscode/
 .env
 .env.*
+build-output/
+staging/
+*.lpcfg
+*.pem
+*.key
+*.pfx
+*.p12
+Diagnostics/
+**/Diagnostics/
+*-handoff.zip
+*-changed-files.zip
+*-developer.zip
