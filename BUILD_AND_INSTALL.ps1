@@ -108,11 +108,20 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed. Copy the compiler errors and send them back for correction." }
     if (-not (Test-Path $TempDll)) { throw "Compiler reported success but did not produce $TempDll" }
 
+    $candidateHash = (Get-FileHash -LiteralPath $TempDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (@(Get-Process -Name "Erenshor" -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw "Erenshor is running. Refusing to replace the installed plugin DLL."
+    }
     Copy-Item -LiteralPath $TempDll -Destination $out -Force
+    $installedHash = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($candidateHash -ne $installedHash) { throw "Installed DLL hash does not match the freshly compiled candidate." }
 }
 finally {
     if (Test-Path $TempDir) { Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host "Installed Forgotten Roads Hub to $out" -ForegroundColor Green
+Write-Host "  Candidate SHA256: $candidateHash"
+Write-Host "  Installed SHA256: $installedHash"
+Write-Host "  Match installed: $($candidateHash -eq $installedHash)"
 Write-Host "Use the draggable MODS UI button in game to open the Overview window." -ForegroundColor Green
