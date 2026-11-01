@@ -13,18 +13,17 @@ namespace ErenshorSuiteHub
     // current Lunaris plugin discovery excludes them as well.
     internal static class ModDiscovery
     {
+        // Guards against junction/symlink cycles; real plugin layouts are a few levels deep.
+        private const int MaxDiscoveryDepth = 32;
+
         internal static List<ModPresence> Scan(string pluginsDirectory)
         {
+            HashSet<string> discoverable = CollectDiscoverableDllNames(pluginsDirectory);
             List<ModPresence> result = new List<ModPresence>(SuiteModuleCatalog.All.Length);
             for (int i = 0; i < SuiteModuleCatalog.All.Length; i++)
             {
                 SuiteModuleDefinition def = SuiteModuleCatalog.All[i];
-                bool installed = false;
-                try
-                {
-                    installed = HasDiscoverableCanonicalDll(pluginsDirectory, def.DllName);
-                }
-                catch { installed = false; }
+                bool installed = !string.IsNullOrEmpty(def.DllName) && discoverable.Contains(def.DllName);
                 result.Add(new ModPresence(def, installed));
             }
             return result;
@@ -56,17 +55,41 @@ namespace ErenshorSuiteHub
             return result;
         }
 
-        private static bool HasDiscoverableCanonicalDll(string pluginsDirectory, string dllName)
+        // Scan runs on the main thread every couple of seconds during gameplay, so walk the tree
+        // once per scan rather than once per catalogued module, and prune config subtrees instead
+        // of walking and then filtering them: they hold per-mod runtime data (Deep Sims memory alone
+        // can be thousands of files) and Lunaris does not load plugins from them anyway. An
+        // unreadable directory is skipped rather than making every module look uninstalled.
+        private static HashSet<string> CollectDiscoverableDllNames(string pluginsDirectory)
         {
-            if (string.IsNullOrEmpty(pluginsDirectory) || string.IsNullOrEmpty(dllName) || !Directory.Exists(pluginsDirectory))
-                return false;
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(pluginsDirectory)) return names;
+            try { if (!Directory.Exists(pluginsDirectory)) return names; }
+            catch { return names; }
 
-            string[] matches = Directory.GetFiles(pluginsDirectory, dllName, SearchOption.AllDirectories);
-            for (int i = 0; i < matches.Length; i++)
+            Stack<KeyValuePair<string, int>> pending = new Stack<KeyValuePair<string, int>>();
+            pending.Push(new KeyValuePair<string, int>(pluginsDirectory, 0));
+            while (pending.Count > 0)
             {
-                if (!IsInsideConfigDirectory(pluginsDirectory, matches[i])) return true;
+                KeyValuePair<string, int> current = pending.Pop();
+                try
+                {
+                    string[] files = Directory.GetFiles(current.Key, "*.dll");
+                    for (int i = 0; i < files.Length; i++) names.Add(Path.GetFileName(files[i]));
+                }
+                catch { }
+
+                if (current.Value >= MaxDiscoveryDepth) continue;
+                string[] children;
+                try { children = Directory.GetDirectories(current.Key); }
+                catch { continue; }
+                for (int i = 0; i < children.Length; i++)
+                {
+                    if (string.Equals(Path.GetFileName(children[i]), "config", StringComparison.OrdinalIgnoreCase)) continue;
+                    pending.Push(new KeyValuePair<string, int>(children[i], current.Value + 1));
+                }
             }
-            return false;
+            return names;
         }
 
         internal static bool IsInsideConfigDirectory(string pluginsDirectory, string candidate)

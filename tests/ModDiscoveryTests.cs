@@ -44,6 +44,17 @@ internal static class ModDiscoveryTests
             ModPresence guild = configIgnored.Find(delegate(ModPresence p) { return p.ModuleId == "guildlife"; });
             a += TestAssert.False(guild.Installed, "config subtree is excluded from Lunaris-compatible disk discovery");
             a += TestAssert.True(ModDiscovery.IsInsideConfigDirectory(dir, Path.Combine(config, "ErenshorGuildLife.dll")), "config path classifier is deterministic");
+
+            string nestedConfig = Path.Combine(dir, "manager", "Config", "old");
+            Directory.CreateDirectory(nestedConfig);
+            File.WriteAllText(Path.Combine(nestedConfig, "ErenshorFollow.dll"), "nested config stub");
+            File.WriteAllText(Path.Combine(dir, "ErenshorDuel.dll.bak"), "backup stub");
+            File.WriteAllText(Path.Combine(nested, "erenshorcampmaster.DLL"), "case stub");
+            List<ModPresence> edges = ModDiscovery.Scan(dir);
+            a += TestAssert.False(edges.Find(delegate(ModPresence p) { return p.ModuleId == "follow"; }).Installed, "a config directory at any depth is pruned, case-insensitively");
+            a += TestAssert.False(edges.Find(delegate(ModPresence p) { return p.ModuleId == "duel"; }).Installed, "a renamed backup is not the canonical module DLL");
+            a += TestAssert.True(edges.Find(delegate(ModPresence p) { return p.ModuleId == "campmaster"; }).Installed, "canonical DLL names match case-insensitively like Windows");
+            a += TestAssert.True(edges.Find(delegate(ModPresence p) { return p.ModuleId == "contracts"; }).Installed, "pruning config does not hide sibling nested modules");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
 

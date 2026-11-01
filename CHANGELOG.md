@@ -7,6 +7,12 @@
 - Forgotten Roads discovery lines now emit ordinary visible text through the typed native
   `ChatLogLine` SystemMessages path. Color is supplied separately from verified native chat
   metadata; named color tokens and rich-text markup are never embedded in the payload.
+- Installed-mod discovery no longer stalls the game every two seconds. It made one full recursive
+  walk of `plugins` per catalogued module (11 walks per scan) and walked `plugins\config` before
+  discarding those matches; on a real install with Deep Sims memory that was ~50 ms per scan on
+  .NET Framework. It now walks the tree once and prunes `config` directories (~0.2 ms), with
+  identical results. An unreadable subdirectory is now skipped instead of making that module
+  report as not installed.
 
 ## 0.5.4 - Forgotten Roads discovery hint
 
